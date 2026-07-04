@@ -15,7 +15,7 @@ import {
 } from "@/config";
 import {
   aonPutObject, fetchSellOffers, fetchBuyerAuthForOffer, fetchMyBuyerAuth,
-  fetchReceipt, fetchCsdProof, fetchCsdBalance, fetchCompletedTrades,
+  fetchReceipt, fetchCsdProof, fetchCsdBalance, fetchCompletedTrades, isAuthorizationRevoked,
   randomHex32, csdAddrToBytes32,
   shortHash, formatCsd, formatUsdc, secondsLeft, formatCountdown,
 } from "@/aon";
@@ -94,6 +94,7 @@ export default function Home() {
 
   // Seller proof submission
   const [csdTxid, setCsdTxid] = useState("");
+  const [revocationDetected, setRevocationDetected] = useState(false);
 
   // Balances
   const [csdBalance, setCsdBalance] = useState<bigint>(0n);
@@ -196,6 +197,9 @@ export default function Home() {
               if (receipt?.payload?.executionTx) setSettledTx(receipt.payload.executionTx);
             } else if (locked > 0n) {
               setSettlementStatus("locked");
+              // Check if buyer revoked on AON — seller must settle directly
+              const revoked = await isAuthorizationRevoked(buyerAuth.objectHash);
+              setRevocationDetected(revoked);
             } else if (buyerAuth) {
               setSettlementStatus("auth_active");
             }
@@ -388,6 +392,78 @@ export default function Home() {
     } finally { setLoading(null); }
   }
 
+  // Seller calls settleCsdUsdc directly — used when buyer revoked on AON
+  // to block the executor. The contract only checks the SPV proof, not revocations.
+  async function settleDirectly() {
+    if (!csdTxid || !matchedAuth || !finalizeObj) return;
+    const a = matchedAuth.payload.authorization;
+
+    setLoading("Fetching CSD proof...");
+    try {
+      const proof = await fetchCsdProof(csdTxid.trim());
+      addLog(`CSD proof: ${proof.confirmations} confirmation(s)`);
+
+      const authTuple = {
+        buyer:               a.buyer,
+        sellerUsdcRecipient: a.sellerUsdcRecipient,
+        sellerCsdScriptHash: a.sellerCsdScriptHash as Hex,
+        csdGenesisHash:      a.csdGenesisHash as Hex,
+        tradeIntentHash:     a.tradeIntentHash as Hex,
+        csdAmount:           BigInt(a.csdAmount),
+        usdc:                a.usdc,
+        usdcAmount:          BigInt(a.usdcAmount),
+        minConfirmations:    BigInt(a.minConfirmations),
+        executorFeeAmount:   BigInt(a.executorFeeAmount ?? 0),
+        validAfter:          BigInt(a.validAfter),
+        validBefore:         BigInt(a.validBefore),
+        nonce:               a.nonce as Hex,
+      };
+
+      const spvProof = {
+        txRaw:       proof.tx_raw as Hex,
+        merkleBranch: (proof.merkle_branch ?? []).map((step: any) => ({
+          hash:   step.hash as Hex,
+          isLeft: step.position === "left" || step.isLeft === true,
+        })),
+        header: {
+          version: Number(proof.header.version),
+          prev:    proof.header.prev as Hex,
+          merkle:  proof.header.merkle as Hex,
+          time:    BigInt(proof.header.time),
+          bits:    Number(proof.header.bits),
+          nonce:   Number(proof.header.nonce),
+        },
+        genesisHash:       proof.genesis_hash as Hex,
+        confirmationChain: (proof.confirmation_chain ?? []).map((h: any) => ({
+          version: Number(h.version),
+          prev:    h.prev as Hex,
+          merkle:  h.merkle as Hex,
+          time:    BigInt(h.time),
+          bits:    Number(h.bits),
+          nonce:   Number(h.nonce),
+        })),
+      };
+
+      setLoading("Submitting settlement tx from your wallet...");
+      const tx = await writeContractAsync({
+        address: SETTLEMENT_CONTRACT,
+        abi: csdUsdcSettlementAbi,
+        functionName: "settleCsdUsdc",
+        args: [authTuple, matchedAuth.signature.signature as Hex, spvProof],
+      });
+      addLog(`Direct settlement tx: ${tx}`);
+      setStatus("Settlement submitted directly. USDC will release once confirmed.");
+      await refresh();
+    } catch (err: any) {
+      const msg = err?.message ?? "Unknown error";
+      if (msg.includes("NOT_FOUND") || msg.includes("404")) {
+        setStatus("CSD transaction not found yet. Wait for it to be mined.");
+      } else {
+        setStatus(`Error: ${msg.slice(0, 120)}`);
+      }
+    } finally { setLoading(null); }
+  }
+
   // Seller submits CSD txid — creates proof object on AON
   async function submitCsdProof() {
     if (!csdTxid || !matchedAuth || !finalizeObj) return;
@@ -440,8 +516,8 @@ export default function Home() {
       <header style={{ marginBottom: 56 }}>
         <div className="row-between" style={{ marginBottom: 32 }}>
           <div>
-            <div className="faint">Covenant</div>
-            <h1 style={{ fontSize: 52, lineHeight: 1.05, margin: "12px 0 0", maxWidth: 700 }}>
+            <div style={{ fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>Covenant</div>
+            <h1 style={{ fontSize: 44, lineHeight: 1.1, margin: "12px 0 0", maxWidth: 700, fontFamily: "var(--serif)", fontWeight: "normal" }}>
               Execution no longer requires trust.
             </h1>
             <p className="muted" style={{ marginTop: 12, maxWidth: 600, fontSize: 17 }}>
@@ -479,7 +555,7 @@ export default function Home() {
       {/* Demo mode banner */}
       {DEMO_MODE && (
         <div style={{
-          background: "rgba(255,214,102,0.08)", border: "1px solid rgba(255,214,102,0.25)",
+          background: "rgba(154,104,0,0.07)", border: "1px solid rgba(255,214,102,0.25)",
           borderRadius: 8, padding: "10px 16px", marginBottom: 18,
           display: "flex", alignItems: "center", gap: 10,
         }}>
@@ -492,7 +568,7 @@ export default function Home() {
 
       {/* Status banner */}
       {status && (
-        <div className="card" style={{ marginBottom: 18, borderColor: "rgba(159,245,200,0.15)" }}>
+        <div className="card" style={{ marginBottom: 18, borderColor: "rgba(26,102,64,0.10)" }}>
           <div className="faint">Status</div>
           <div style={{ marginTop: 8, fontSize: 17 }}>{status}</div>
         </div>
@@ -503,7 +579,7 @@ export default function Home() {
         <div className="row-between">
           <div>
             <div className="faint">Market</div>
-            <div style={{ fontSize: 22, marginTop: 6 }}>CSD / USDC</div>
+            <div style={{ fontSize: 20, marginTop: 6 }}>CSD / USDC</div>
           </div>
           <div className="row" style={{ gap: 8 }}>
             <button
@@ -536,7 +612,7 @@ export default function Home() {
                     style={{
                       cursor: mode === "buy" ? "pointer" : "default",
                       borderColor: selectedOffer?.objectHash === offer.objectHash
-                        ? "rgba(159,245,200,0.35)"
+                        ? "rgba(26,102,64,0.22)"
                         : undefined,
                     }}
                   >
@@ -584,7 +660,7 @@ export default function Home() {
             <div className="card grid">
               <div>
                 <div className="faint" style={{ marginBottom: 8 }}>Buy CSD</div>
-                <h2 style={{ margin: 0 }}>
+                <h2 style={{ margin: 0, fontFamily: "var(--serif)", fontWeight: "normal" }}>
                   {selectedOffer
                     ? `${formatCsd(selectedOffer.payload.csdAmount)} CSD for ${formatUsdc(selectedOffer.payload.usdcAmount)} USDC`
                     : "Select a sell offer"}
@@ -594,7 +670,7 @@ export default function Home() {
               {!selectedOffer ? (
                 <div className="muted">Choose an offer from the sell book to continue.</div>
               ) : settlementStatus === "settled" ? (
-                <div className="card-inner" style={{ borderColor: "rgba(159,245,200,0.25)" }}>
+                <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.18)" }}>
                   <div className="faint">Settled</div>
                   <div className="accent" style={{ fontSize: 20, marginTop: 8 }}>CSD payment verified. USDC released.</div>
                   {settledTx && (
@@ -625,7 +701,7 @@ export default function Home() {
                   </div>
 
                   {settlementStatus === "locked" && (
-                    <div className="card-inner" style={{ borderColor: "rgba(159,245,200,0.25)" }}>
+                    <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.18)" }}>
                       <div className="faint">Settlement locked</div>
                       <div style={{ marginTop: 8, fontSize: 20 }}>{formatUsdc(lockedAmount.toString())} USDC reserved</div>
                       {windowRemaining > 0 && (
@@ -654,7 +730,7 @@ export default function Home() {
               ) : (
                 // No auth yet — show buy form
                 <div className="col">
-                  <div className="card-inner" style={{ borderColor: "rgba(255,214,102,0.15)" }}>
+                  <div className="card-inner" style={{ borderColor: "rgba(154,104,0,0.10)" }}>
                     <div className="faint">Trade limit</div>
                     <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
                       Maximum 100 USDC per trade. This limit is enforced by the settlement contract
@@ -697,7 +773,7 @@ export default function Home() {
                       {loading ?? "Approve USDC"}
                     </button>
                   ) : BigInt(selectedOffer.payload.usdcAmount) > 100_000_000n ? (
-                    <div className="card-inner" style={{ borderColor: "rgba(255,107,107,0.25)" }}>
+                    <div className="card-inner" style={{ borderColor: "rgba(192,57,43,0.18)" }}>
                       <div className="danger" style={{ fontSize: 14 }}>
                         This offer exceeds the 100 USDC contract limit and cannot be settled.
                         Contact the seller to split into smaller trades.
@@ -727,7 +803,7 @@ export default function Home() {
               {!mySellOffer ? (
                 // Create sell offer form
                 <div className="col">
-                  <div className="card-inner" style={{ borderColor: "rgba(255,214,102,0.15)" }}>
+                  <div className="card-inner" style={{ borderColor: "rgba(154,104,0,0.10)" }}>
                     <div className="faint">Trade limit</div>
                     <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
                       Maximum 100 USDC per trade, enforced by the settlement contract.
@@ -764,7 +840,7 @@ export default function Home() {
               ) : !matchedAuth ? (
                 // Waiting for a buyer
                 <div className="col">
-                  <div className="card-inner" style={{ borderColor: "rgba(159,245,200,0.15)" }}>
+                  <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.10)" }}>
                     <div className="faint">Your offer is live</div>
                     <div style={{ fontSize: 20, marginTop: 8 }}>
                       {formatCsd(mySellOffer.payload.csdAmount)} CSD
@@ -784,7 +860,7 @@ export default function Home() {
               ) : (
                 // Have a buyer auth — show lock + settlement flow
                 <div className="col">
-                  <div className="card-inner" style={{ borderColor: "rgba(159,245,200,0.20)" }}>
+                  <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.12)" }}>
                     <div className="faint">Buyer authorization received</div>
                     <div style={{ marginTop: 8, fontSize: 17 }}>
                       {formatCsd(matchedAuth.payload.authorization.csdAmount)} CSD ·{" "}
@@ -812,7 +888,7 @@ export default function Home() {
                   ) : (
                     // Locked — show CSD send instructions + txid form
                     <div className="col">
-                      <div className="card-inner" style={{ borderColor: "rgba(159,245,200,0.20)" }}>
+                      <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.12)" }}>
                         <div className="faint">USDC locked</div>
                         <div style={{ fontSize: 20, marginTop: 8 }}>{formatUsdc(lockedAmount.toString())} USDC reserved</div>
                         {windowRemaining > 0 && (
@@ -821,6 +897,22 @@ export default function Home() {
                           </div>
                         )}
                       </div>
+
+                      {/* Revocation warning — buyer revoked on AON to block the executor */}
+                      {revocationDetected && (
+                        <div className="card-inner" style={{ borderColor: "rgba(192,57,43,0.25)" }}>
+                          <div className="danger" style={{ fontWeight: 500, marginBottom: 6 }}>
+                            ⚠ Buyer revoked authorization on AON
+                          </div>
+                          <div className="muted" style={{ fontSize: 13, lineHeight: 1.6 }}>
+                            The executor will not auto-settle a revoked authorization.
+                            If you have already sent CSD, submit your txid below and click
+                            "Settle directly" — this calls the contract from your wallet,
+                            bypassing the executor. The contract only checks the CSD payment,
+                            not AON revocations.
+                          </div>
+                        </div>
+                      )}
 
                       <div className="card-inner">
                         <div className="faint" style={{ marginBottom: 8 }}>Send CSD to buyer</div>
@@ -843,13 +935,24 @@ export default function Home() {
                         />
                       </div>
 
-                      <button
-                        className="btn"
-                        onClick={submitCsdProof}
-                        disabled={!csdTxid || !!loading}
-                      >
-                        {loading ?? "Verify payment + settle"}
-                      </button>
+                      {revocationDetected ? (
+                        <button
+                          className="btn-danger"
+                          style={{ fontWeight: 600 }}
+                          onClick={settleDirectly}
+                          disabled={!csdTxid || !!loading}
+                        >
+                          {loading ?? "Settle directly (bypass executor)"}
+                        </button>
+                      ) : (
+                        <button
+                          className="btn"
+                          onClick={submitCsdProof}
+                          disabled={!csdTxid || !!loading}
+                        >
+                          {loading ?? "Verify payment + settle"}
+                        </button>
+                      )}
                       <div className="muted" style={{ fontSize: 13 }}>
                         Wait until the CSD transaction is mined before submitting.
                       </div>
@@ -870,7 +973,7 @@ export default function Home() {
             <div className="faint">Ethereum wallet</div>
             <div style={{ marginTop: 14 }}>
               <div className="muted" style={{ fontSize: 13 }}>USDC</div>
-              <div style={{ fontSize: 28, marginTop: 4 }}>{formatUsdc(usdcBalance)}</div>
+              <div style={{ fontSize: 24, marginTop: 4 }}>{formatUsdc(usdcBalance)}</div>
             </div>
           </div>
           {csdReceiveAddr && (
@@ -878,7 +981,7 @@ export default function Home() {
               <div className="faint">Compute Substrate wallet</div>
               <div style={{ marginTop: 14 }}>
                 <div className="muted" style={{ fontSize: 13 }}>CSD</div>
-                <div style={{ fontSize: 28, marginTop: 4 }}>{formatCsd(csdBalance)}</div>
+                <div style={{ fontSize: 24, marginTop: 4 }}>{formatCsd(csdBalance)}</div>
               </div>
             </div>
           )}
@@ -903,7 +1006,7 @@ export default function Home() {
             <div className="row-between" style={{ marginBottom: 16 }}>
               <div>
                 <div className="faint">CSD / USDC price</div>
-                <div style={{ fontSize: 26, marginTop: 4 }}>
+                <div style={{ fontSize: 20, marginTop: 4 }}>
                   {chartData[chartData.length - 1]?.price.toLocaleString(undefined, { maximumFractionDigits: 4 })}
                   <span className="muted" style={{ fontSize: 14, marginLeft: 8 }}>USDC / CSD</span>
                 </div>
@@ -917,14 +1020,14 @@ export default function Home() {
             </div>
             <ResponsiveContainer width="100%" height={160}>
               <LineChart data={chartData} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
-                <XAxis dataKey="label" tick={{ fill: "var(--faint)", fontSize: 11 }} axisLine={false} tickLine={false} />
-                <YAxis domain={[minP - pad, maxP + pad]} tick={{ fill: "var(--faint)", fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={v => v.toFixed(3)} />
+                <XAxis dataKey="label" tick={{ fill: "var(--faint)", fontSize: 11, fontFamily: "var(--font)" }} axisLine={false} tickLine={false} />
+                <YAxis domain={[minP - pad, maxP + pad]} tick={{ fill: "var(--faint)", fontSize: 11, fontFamily: "var(--font)" }} axisLine={false} tickLine={false} tickFormatter={v => v.toFixed(3)} />
                 <Tooltip
-                  contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, fontSize: 13 }}
-                  labelStyle={{ color: "var(--muted)" }}
+                  contentStyle={{ background: "var(--bg)", border: "1px solid var(--border2)", borderRadius: 4, fontSize: 13 }}
+                  labelStyle={{ color: "var(--muted)", fontFamily: "var(--font)" }}
                   formatter={(v: any) => [`${Number(v).toFixed(4)} USDC/CSD`, "Price"]}
                 />
-                <Line type="monotone" dataKey="price" stroke="var(--accent)" strokeWidth={2} dot={{ fill: "var(--accent)", r: 3 }} activeDot={{ r: 5 }} />
+                <Line type="monotone" dataKey="price" stroke="var(--green)" strokeWidth={2} dot={{ fill: "var(--green)", r: 3 }} activeDot={{ r: 5 }} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -952,7 +1055,7 @@ export default function Home() {
                     </td>
                     <td style={{ padding: "10px 12px 10px 0" }}>{formatCsd(t.csdAmount)}</td>
                     <td style={{ padding: "10px 12px 10px 0" }}>{formatUsdc(t.usdcAmount)}</td>
-                    <td style={{ padding: "10px 12px 10px 0", color: "var(--accent)" }}>
+                    <td style={{ padding: "10px 12px 10px 0", color: "var(--green)" }}>
                       {t.pricePerCsd.toLocaleString(undefined, { maximumFractionDigits: 4 })}
                     </td>
                     <td style={{ padding: "10px 12px 10px 0", fontFamily: "var(--mono)", color: "var(--muted)" }}>

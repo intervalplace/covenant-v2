@@ -392,6 +392,45 @@ export default function Home() {
     } finally { setLoading(null); }
   }
 
+  // Claims refund of expired USDC lock back to buyer.
+  // Permissionless — anyone can call after the window expires.
+  async function claimRefund() {
+    const auth = myBuyerAuth ?? matchedAuth;
+    if (!auth) return;
+    const a = auth.payload.authorization;
+
+    const authTuple = {
+      buyer:               a.buyer,
+      sellerUsdcRecipient: a.sellerUsdcRecipient,
+      sellerCsdScriptHash: a.sellerCsdScriptHash as Hex,
+      csdGenesisHash:      a.csdGenesisHash as Hex,
+      tradeIntentHash:     a.tradeIntentHash as Hex,
+      csdAmount:           BigInt(a.csdAmount),
+      usdc:                a.usdc,
+      usdcAmount:          BigInt(a.usdcAmount),
+      minConfirmations:    BigInt(a.minConfirmations),
+      executorFeeAmount:   BigInt(a.executorFeeAmount ?? 0),
+      validAfter:          BigInt(a.validAfter),
+      validBefore:         BigInt(a.validBefore),
+      nonce:               a.nonce as Hex,
+    };
+
+    setLoading("Refunding USDC to buyer...");
+    try {
+      const tx = await writeContractAsync({
+        address: SETTLEMENT_CONTRACT,
+        abi: csdUsdcSettlementAbi,
+        functionName: "refundExpiredLock",
+        args: [authTuple],
+      });
+      addLog(`Refund tx: ${tx}`);
+      setStatus("Refund submitted. USDC is returning to buyer.");
+      await refresh();
+    } catch (err: any) {
+      setStatus(`Refund error: ${(err?.shortMessage ?? err?.message ?? "").slice(0, 120)}`);
+    } finally { setLoading(null); }
+  }
+
   // Seller calls settleCsdUsdc directly — used when buyer revoked on AON
   // to block the executor. The contract only checks the SPV proof, not revocations.
   async function settleDirectly() {
@@ -491,7 +530,7 @@ export default function Home() {
 
       await aonPutObject(proofObj);
       addLog(`Proof object: ${proofObj.objectHash}`);
-      setStatus("Proof submitted. Executor is settling — USDC will release shortly.");
+      setStatus("Proof submitted. The executor is settling and USDC will release shortly.");
       await refresh();
     } catch (err: any) {
       const msg = err?.message ?? "Unknown error";
@@ -521,7 +560,7 @@ export default function Home() {
               Execution no longer requires trust.
             </h1>
             <p className="muted" style={{ marginTop: 12, maxWidth: 600, fontSize: 17 }}>
-              CSD/USDC settlement — trustless, on-chain SPV verified.
+              CSD/USDC settlement. Trustless, on-chain SPV verified.
             </p>
           </div>
           <div className="col" style={{ alignItems: "flex-end", gap: 12 }}>
@@ -702,30 +741,49 @@ export default function Home() {
 
                   {settlementStatus === "locked" && (
                     <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.18)" }}>
-                      <div className="faint">Settlement locked</div>
-                      <div style={{ marginTop: 8, fontSize: 20 }}>{formatUsdc(lockedAmount.toString())} USDC reserved</div>
-                      {windowRemaining > 0 && (
-                        <div className="muted" style={{ marginTop: 8 }}>
-                          Window: {formatCountdown(windowRemaining)} remaining
+                      <div className="faint">Settlement window</div>
+                      <div style={{ marginTop: 10, fontSize: 13, color: "var(--muted)" }}>
+                        {formatUsdc(lockedAmount.toString())} USDC reserved
+                      </div>
+                      {windowRemaining > 0 ? (
+                        <div style={{ marginTop: 14, display: "flex", alignItems: "baseline", gap: 8 }}>
+                          <span style={{ fontFamily: "var(--serif)", fontSize: 36, lineHeight: 1 }}>
+                            {formatCountdown(windowRemaining)}
+                          </span>
+                          <span className="muted" style={{ fontSize: 13 }}>remaining</span>
+                        </div>
+                      ) : (
+                        <div className="warn" style={{ marginTop: 10, fontSize: 14 }}>
+                          Window expired. Awaiting refund.
                         </div>
                       )}
-                      <div className="muted" style={{ marginTop: 8, fontSize: 13 }}>
-                        Seller is sending CSD. Settlement is automatic once the proof is verified on-chain.
+                      <div className="muted" style={{ marginTop: 12, fontSize: 13 }}>
+                        Seller is sending CSD. Settlement releases your USDC automatically once the proof is verified on-chain.
                       </div>
                     </div>
                   )}
 
-                  {settlementStatus === "auth_active" && (
-                    <div className="card-inner">
-                      <div className="faint">Waiting for seller</div>
-                      <div className="muted" style={{ marginTop: 8 }}>
-                        Seller needs to lock USDC for settlement.
+                  {settlementStatus === "auth_active" && (() => {
+                    const expiresIn = secondsLeft(myBuyerAuth!.payload.authorization.validBefore);
+                    const urgent = expiresIn < 600; // under 10 minutes
+                    return (
+                      <div className="card-inner">
+                        <div className="faint">Authorization expires in</div>
+                        <div style={{ marginTop: 14, display: "flex", alignItems: "baseline", gap: 8 }}>
+                          <span style={{
+                            fontFamily: "var(--serif)", fontSize: 36, lineHeight: 1,
+                            color: urgent ? "var(--warn)" : "var(--fg)",
+                          }}>
+                            {formatCountdown(expiresIn)}
+                          </span>
+                        </div>
+                        <div className="muted" style={{ marginTop: 12, fontSize: 13 }}>
+                          Waiting for seller to lock USDC. If the seller does not lock before expiry,
+                          create a new authorization.
+                        </div>
                       </div>
-                      <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-                        Expires in: {formatCountdown(secondsLeft(myBuyerAuth.payload.authorization.validBefore))}
-                      </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </div>
               ) : (
                 // No auth yet — show buy form
@@ -889,16 +947,33 @@ export default function Home() {
                     // Locked — show CSD send instructions + txid form
                     <div className="col">
                       <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.12)" }}>
-                        <div className="faint">USDC locked</div>
-                        <div style={{ fontSize: 20, marginTop: 8 }}>{formatUsdc(lockedAmount.toString())} USDC reserved</div>
-                        {windowRemaining > 0 && (
-                          <div className="warn" style={{ marginTop: 8 }}>
-                            Settlement window: {formatCountdown(windowRemaining)} remaining
+                        <div className="faint">Settlement window</div>
+                        <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>
+                          {formatUsdc(lockedAmount.toString())} USDC reserved
+                        </div>
+                        {windowRemaining > 0 ? (
+                          <div style={{ marginTop: 14, display: "flex", alignItems: "baseline", gap: 8 }}>
+                            <span style={{
+                              fontFamily: "var(--serif)", fontSize: 36, lineHeight: 1,
+                              color: windowRemaining < 180 ? "var(--danger)" : windowRemaining < 600 ? "var(--warn)" : "var(--fg)",
+                            }}>
+                              {formatCountdown(windowRemaining)}
+                            </span>
+                            <span className="muted" style={{ fontSize: 13 }}>remaining</span>
                           </div>
-                        )}
+                        ) : lockedAmount > 0n ? (
+                          <div className="col" style={{ gap: 10, marginTop: 10 }}>
+                            <div className="danger" style={{ fontSize: 13 }}>
+                              Window expired. Settlement cannot proceed. Trigger refund to buyer.
+                            </div>
+                            <button className="btn-secondary" onClick={claimRefund} disabled={!!loading}>
+                              {loading ?? "Refund buyer"}
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
 
-                      {/* Revocation warning — buyer revoked on AON to block the executor */}
+                      {/* Revocation warning: buyer revoked on AON to block the executor */}
                       {revocationDetected && (
                         <div className="card-inner" style={{ borderColor: "rgba(192,57,43,0.25)" }}>
                           <div className="danger" style={{ fontWeight: 500, marginBottom: 6 }}>
@@ -907,7 +982,7 @@ export default function Home() {
                           <div className="muted" style={{ fontSize: 13, lineHeight: 1.6 }}>
                             The executor will not auto-settle a revoked authorization.
                             If you have already sent CSD, submit your txid below and click
-                            "Settle directly" — this calls the contract from your wallet,
+                            "Settle directly". This calls the contract from your wallet,
                             bypassing the executor. The contract only checks the CSD payment,
                             not AON revocations.
                           </div>
@@ -1089,7 +1164,7 @@ export default function Home() {
           <div className="col" style={{ gap: 6 }}>
             {logs.map((l, i) => (
               <div key={i} className="muted" style={{ fontSize: 13 }}>
-                {new Date(l.ts).toLocaleTimeString()} — {l.text}
+                {new Date(l.ts).toLocaleTimeString()} {l.text}
               </div>
             ))}
           </div>

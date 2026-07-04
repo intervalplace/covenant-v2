@@ -24,7 +24,7 @@ export default function Docs() {
           <p className="muted" style={{ lineHeight: 1.8 }}>
             Authorization is not a one-time setup step. It is a condition checked at
             settlement time. If the authorization has expired, been revoked, or exceeds
-            its defined boundary, execution fails — regardless of what was agreed earlier.
+            its defined boundary, execution fails, regardless of what was agreed earlier.
           </p>
         </section>
 
@@ -34,7 +34,7 @@ export default function Docs() {
             <div style={{ fontWeight: 600, marginBottom: 5 }}>User</div>
             <p className="muted" style={{ lineHeight: 1.8 }}>
               Signs bounded authorizations. Assets stay in the user's wallet or in
-              the settlement contract escrow — never in Covenant's custody.
+              the settlement contract escrow. Assets are never in Covenant's custody.
               The user controls when to revoke.
             </p>
           </div>
@@ -60,7 +60,7 @@ export default function Docs() {
             <p className="muted" style={{ lineHeight: 1.8 }}>
               Verifies authorization signatures, validity windows, and payment proofs
               before releasing funds. Enforces all settlement conditions on-chain.
-              Maximum 100 USDC per trade — enforced in the contract, not the interface.
+              Maximum 100 USDC per trade, enforced in the contract rather than the interface.
             </p>
           </div>
         </section>
@@ -68,8 +68,8 @@ export default function Docs() {
         <section style={{ padding: "24px 0", borderBottom: "1px solid var(--border)" }}>
           <h2 style={{ fontSize: 18, marginBottom: 12 }}>What runs underneath</h2>
           <p className="muted" style={{ lineHeight: 1.8, marginBottom: 10 }}>
-            Covenant has no backend. All state — sell offers, buyer authorizations,
-            payment proofs, receipts — lives on{" "}
+            Covenant has no backend. All state (sell offers, buyer authorizations,
+            payment proofs, receipts) lives on{" "}
             <a href="https://aon.network" target="_blank" rel="noreferrer">AON</a>,
             a peer-to-peer network of content-addressed objects. There is no Covenant
             database. If Covenant's interface disappeared tomorrow, every object would
@@ -80,7 +80,7 @@ export default function Docs() {
             Settlement is enforced by a{" "}
             <a href="https://computesubstrate.org" target="_blank" rel="noreferrer">Compute Substrate</a>{" "}
             light client deployed on Ethereum. The contract verifies SPV proofs of CSD
-            payments — the same mechanism Bitcoin uses for lightweight payment verification.
+            payments, using the same SPV mechanism Bitcoin uses for lightweight payment verification.
           </p>
         </section>
 
@@ -89,7 +89,7 @@ export default function Docs() {
           <ol style={{ paddingLeft: 20, color: "var(--muted)", lineHeight: 2 }}>
             <li>Seller creates a CSD sell offer on the AON network.</li>
             <li>Buyer selects the offer and enters their CSD receive address.</li>
-            <li>Buyer approves USDC and signs a bounded authorization — binding their address, exact amounts, and the specific offer.</li>
+            <li>Buyer approves USDC and signs a bounded authorization that binds their address, exact amounts, and the specific offer.</li>
             <li>Seller sees the authorization and, when ready, locks USDC from their wallet.</li>
             <li>Seller sends CSD to the buyer's address on Compute Substrate.</li>
             <li>Seller submits the CSD transaction ID.</li>
@@ -102,7 +102,7 @@ export default function Docs() {
           <h2 style={{ fontSize: 18, marginBottom: 12 }}>Revocation</h2>
           <p className="muted" style={{ lineHeight: 1.8, marginBottom: 10 }}>
             Before settlement lock, the buyer can revoke authorization. Revocation
-            is an object published to the AON network — executors check for it before
+            is an object published to the AON network. Executors check for it before
             acting. After revocation, the executor will not call the settlement contract.
           </p>
           <p className="muted" style={{ lineHeight: 1.8, marginBottom: 10 }}>
@@ -113,7 +113,7 @@ export default function Docs() {
           </p>
           <p className="muted" style={{ lineHeight: 1.8 }}>
             If a buyer revokes on AON after USDC is locked, the seller can call the
-            settlement contract directly with the CSD proof — bypassing the executor.
+            settlement contract directly with the CSD proof, bypassing the executor.
             The contract verifies the payment proof alone, independent of AON
             revocation state. The Covenant interface detects revocations while locked
             and shows the seller a direct settlement button.
@@ -139,8 +139,7 @@ export default function Docs() {
           <p className="muted" style={{ lineHeight: 1.8 }}>
             Covenant is experimental software. The 100 USDC per trade limit reflects
             1-confirmation settlement on an early-stage proof-of-work chain. Settlement
-            is trustless — the contract does not rely on Covenant or any operator — but
-            trade sizes are bounded to match current network security assumptions.
+            is trustless. The contract does not rely on Covenant or any operator. Trade sizes are bounded to match current network security assumptions.
             The limit will increase as Compute Substrate hashrate grows.
           </p>
         </section>

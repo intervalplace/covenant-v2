@@ -81,7 +81,53 @@ export async function fetchReceipt(authHash: string): Promise<AonReceipt | null>
   return receipt ?? null;
 }
 
-// ── CSD proof ─────────────────────────────────────────────────────────────────
+// ── Completed trades ──────────────────────────────────────────────────────────
+
+export async function fetchCompletedTrades(): Promise<import("./types").CompletedTrade[]> {
+  const [receiptsData, authsData] = await Promise.all([
+    aonGet("/objects?objectType=receipt&namespace=aon:csd-usdc&limit=100"),
+    aonGet("/objects?objectType=authorization&namespace=aon:csd-usdc&limit=100"),
+  ]);
+
+  // Map auth objects by their AON object hash
+  const authMap = new Map<string, any>();
+  for (const auth of authsData.objects ?? []) {
+    authMap.set(auth.objectHash.toLowerCase(), auth);
+  }
+
+  const trades: import("./types").CompletedTrade[] = [];
+
+  for (const receipt of receiptsData.objects ?? []) {
+    // receipt.references = [authObjHash, reserveObjHash, proofObjHash]
+    const authHash = receipt.references?.[0];
+    if (!authHash) continue;
+
+    const auth = authMap.get(authHash.toLowerCase());
+    if (!auth) continue;
+
+    const a = auth.payload?.authorization;
+    if (!a?.csdAmount || !a?.usdcAmount) continue;
+
+    const csdHuman  = Number(a.csdAmount)  / 1e8;
+    const usdcHuman = Number(a.usdcAmount) / 1e6;
+
+    trades.push({
+      receiptHash:         receipt.objectHash,
+      authHash,
+      csdAmount:           a.csdAmount,
+      usdcAmount:          a.usdcAmount,
+      pricePerCsd:         csdHuman > 0 ? usdcHuman / csdHuman : 0,
+      buyer:               a.buyer,
+      sellerUsdcRecipient: a.sellerUsdcRecipient,
+      executionTx:         receipt.payload?.executionTx ?? "",
+      timestamp:           receipt.createdAt ?? Date.now(),
+    });
+  }
+
+  return trades.sort((a, b) => b.timestamp - a.timestamp);
+}
+
+
 
 export async function fetchCsdProof(txid: string): Promise<any> {
   const res = await fetch(`${COVENANT_SERVER}/v1/csd/proof/${txid}`);

@@ -445,7 +445,7 @@ export default function Home() {
               Execution no longer requires trust.
             </h1>
             <p className="muted" style={{ marginTop: 12, maxWidth: 600, fontSize: 17 }}>
-              Settlement requires current authorization.
+              CSD/USDC settlement — trustless, on-chain SPV verified.
             </p>
           </div>
           <div className="col" style={{ alignItems: "flex-end", gap: 12 }}>
@@ -999,6 +999,8 @@ export default function Home() {
           <a href="https://aon.network" target="_blank" rel="noreferrer">AON</a>
           {" "}and{" "}
           <a href="https://computesubstrate.org" target="_blank" rel="noreferrer">Compute Substrate</a>
+          {" · "}
+          <a href="/about">How it works</a>
           {" · "}No custody. No authority.
         </div>
       </footer>

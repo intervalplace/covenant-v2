@@ -8,12 +8,15 @@ export default function About() {
 
       <div style={{ marginBottom: 56 }}>
         <div className="faint">Covenant</div>
-        <h1 style={{ fontSize: 40, lineHeight: 1.1, margin: "12px 0 0" }}>
+        <h1 style={{ fontSize: 38, lineHeight: 1.1, margin: "12px 0 0", fontFamily: "var(--serif)", fontWeight: "normal" }}>
           Execution no longer requires trust.
         </h1>
         <p className="muted" style={{ marginTop: 16, fontSize: 17, lineHeight: 1.7 }}>
-          Covenant is a CSD/USDC market where trades settle automatically. There is no custodian,
-          no bridge, and no trusted third party of any kind.
+          Covenant is a CSD/USDC market with no backend, no database, and no company
+          server. Every piece of state — offers, authorizations, proofs, receipts —
+          lives as a content-addressed object on AON, a peer-to-peer network.
+          Settlement is enforced entirely by smart contracts. There is nothing in
+          the middle.
         </p>
       </div>
 
@@ -23,11 +26,20 @@ export default function About() {
         <div className="card">
           <div className="faint" style={{ marginBottom: 12 }}>What it is</div>
           <p style={{ lineHeight: 1.8, color: "var(--muted)" }}>
-            Covenant lets you trade CSD (Compute Substrate) for USDC on Ethereum.
-            The settlement is fully trustless: the USDC release is conditional on a
-            verifiable CSD payment, checked on-chain by a Compute Substrate light client
-            deployed on Ethereum. If the CSD payment didn't happen, the USDC doesn't move.
-            No attestation. No oracle. No custody.
+            Most trading platforms hold your state in a database they control. Covenant
+            holds no state at all. Every sell offer, every buyer authorization, every
+            payment proof, every settlement receipt is a public object on AON — signed,
+            content-addressed, and propagated across every node on the network. No
+            Covenant server stores any of this. If Covenant shut down tomorrow, every
+            object would still exist on the network and any executor could still settle
+            outstanding trades directly against the contracts.
+          </p>
+          <p style={{ lineHeight: 1.8, color: "var(--muted)", marginTop: 12 }}>
+            The market itself is CSD/USDC: trading CSD — the native token of Compute
+            Substrate — for USDC on Ethereum. Settlement is enforced on-chain by a
+            Compute Substrate light client: the USDC release is conditional on a
+            verifiable payment proof. If the CSD payment didn't happen, the USDC
+            doesn't move. No attestation. No oracle. No custody.
           </p>
         </div>
 
@@ -37,7 +49,7 @@ export default function About() {
           <div className="col" style={{ gap: 14 }}>
             {[
               ["Seller posts an offer", "The seller creates a sell offer on the network — how much CSD they're selling and the USDC price. The offer is a public object on the AON network, visible to anyone."],
-              ["Buyer authorizes the trade", "The buyer signs an EIP-712 authorization committing to: the exact USDC amount, the exact CSD amount, and their CSD receive address. This signature is published to the AON network and is irrevocable — it cryptographically binds the buyer to those specific terms."],
+              ["Buyer authorizes the trade", "The buyer signs an EIP-712 authorization committing to: the exact USDC amount, the exact CSD amount, and their CSD receive address. This signature is published to the AON network. The buyer can revoke the authorization at any time before the seller locks USDC — but once locked, the settlement proceeds automatically if valid CSD proof arrives within the 20-minute window."],
               ["Seller locks USDC", "When the seller is ready, they call the settlement contract directly from their wallet to lock the buyer's USDC. The contract verifies the buyer's signature, pulls the USDC (pre-approved by the buyer), and holds it in escrow for up to 20 minutes."],
               ["Seller sends CSD", "The seller sends the exact CSD amount to the buyer's address on the Compute Substrate network."],
               ["Proof submitted", "The CSD transaction is submitted as an SPV proof object to the AON network. The proof includes the raw transaction, the merkle path, and the block header."],
@@ -46,9 +58,9 @@ export default function About() {
               <div key={i} style={{ display: "flex", gap: 16 }}>
                 <div style={{
                   width: 26, height: 26, borderRadius: "50%", flexShrink: 0,
-                  background: "rgba(159,245,200,0.1)", border: "1px solid rgba(159,245,200,0.2)",
+                  background: "var(--surface2)", border: "1px solid var(--border2)",
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 12, color: "var(--accent)", fontWeight: 600, marginTop: 1,
+                  fontSize: 12, color: "var(--fg)", fontWeight: 600, marginTop: 1,
                 }}>
                   {i + 1}
                 </div>
@@ -116,11 +128,15 @@ export default function About() {
                 </a>
               </div>
               <div className="muted" style={{ fontSize: 14, lineHeight: 1.7 }}>
-                All coordination — sell offers, authorizations, proofs, receipts — lives as
-                content-addressed objects on AON, a peer-to-peer network running across
-                TCP/IP, WebSocket, LoRa, Bluetooth, and Reticulum simultaneously. There is
-                no central database. Objects propagate to every connected node and are
-                available forever by hash.
+                AON is the layer that makes Covenant possible without a backend. Every
+                object in Covenant — sell offers, buyer authorizations, CSD payment
+                proofs, settlement receipts — is published to AON as a content-addressed
+                object and propagated across every connected node. The network runs across
+                TCP/IP, WebSocket, LoRa, Bluetooth, and Reticulum simultaneously. Objects
+                are available by hash from any node, permanently, without asking permission
+                from anyone. When you look at the AON explorer and see the objects
+                behind a completed trade, that is the entire record of what happened —
+                not a log in a database, not something a company controls.
               </div>
             </div>
             <div>
@@ -130,10 +146,12 @@ export default function About() {
                 </a>
               </div>
               <div className="muted" style={{ fontSize: 14, lineHeight: 1.7 }}>
-                CSD is the native token of Compute Substrate, a proof-of-work settlement
-                layer. The Compute Substrate light client deployed on Ethereum tracks the
-                CSD header chain and verifies SPV proofs — the same mechanism Bitcoin uses
-                to let lightweight clients verify payments without downloading the full chain.
+                CSD is the native token of Compute Substrate, a permissionless public
+                cognition layer. A Compute Substrate light client is deployed on Ethereum
+                and tracks the CSD header chain — the same SPV mechanism Bitcoin uses to
+                verify payments without downloading the full chain. This is what makes the
+                settlement trustless: the contract checks the actual proof-of-work, not
+                an oracle's word.
               </div>
             </div>
           </div>

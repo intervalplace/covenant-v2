@@ -14,11 +14,15 @@ const hardhat = defineChain({
 
 const isDev = process.env.NEXT_PUBLIC_CHAIN_ID === "31337";
 
-// Two separate configs to satisfy TypeScript — transports must match chains exactly
+// Allow a custom RPC URL via env to avoid CORS issues with the default
+// wagmi public transport (eth.merkle.io blocks localhost requests).
+// Set NEXT_PUBLIC_ETH_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/<key>
+const ethRpc = process.env.NEXT_PUBLIC_ETH_RPC_URL;
+
 const mainnetConfig = createConfig({
   chains:     [mainnet],
   connectors: [injected()],
-  transports: { [mainnet.id]: http() },
+  transports: { [mainnet.id]: ethRpc ? http(ethRpc) : http() },
   ssr: true,
 });
 

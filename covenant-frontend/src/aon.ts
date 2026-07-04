@@ -147,6 +147,26 @@ export async function fetchCsdBalance(scriptPubKey: string): Promise<bigint> {
   }
 }
 
+// ── Revocation check ─────────────────────────────────────────────────────────
+
+// Returns true if a revocation object exists for this authorization.
+// Called when USDC is locked — if detected, seller should settle directly
+// rather than waiting for the executor (which refuses to act on revoked auths).
+export async function isAuthorizationRevoked(authObjectHash: string): Promise<boolean> {
+  try {
+    const data = await aonGet(
+      `/objects?objectType=revocation&namespace=aon:csd-usdc&references=${authObjectHash}&limit=5`
+    );
+    return (data.objects ?? []).some((o: any) =>
+      (o.references ?? []).some((r: string) =>
+        r.toLowerCase() === authObjectHash.toLowerCase()
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 export function randomHex32(): `0x${string}` {

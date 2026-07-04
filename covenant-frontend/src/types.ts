@@ -67,4 +67,17 @@ export type SettlementStatus =
   | "proof_submitted" // proof object on AON, executor settling
   | "settled";        // receipt on AON
 
+export type CompletedTrade = {
+  receiptHash:        string;
+  authHash:           string;
+  csdAmount:          string;   // satoshis
+  usdcAmount:         string;   // 6-decimal USDC units
+  pricePerCsd:        number;   // USDC per CSD, human-readable
+  buyer:              Address;
+  sellerUsdcRecipient: Address;
+  executionTx:        string;
+  timestamp:          number;   // ms
+};
+
+
 export type Log = { ts: number; text: string };

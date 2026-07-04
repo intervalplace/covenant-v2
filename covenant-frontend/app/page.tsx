@@ -69,6 +69,7 @@ export default function Home() {
   const [csdAmountHuman, setCsdAmountHuman] = useState("5");
   const [usdcPerCsd,     setUsdcPerCsd]     = useState("1");
   const [usdcRecipient,  setUsdcRecipient]  = useState("");
+  const [executorFeeUsdc, setExecutorFeeUsdc] = useState("0");
 
   // My sell offer on AON
   const [mySellOffer, setMySellOffer] = useState<SellOffer | null>(null);
@@ -242,6 +243,7 @@ export default function Home() {
         csdAmount:           csdSats.toString(),
         usdcAmount:          usdcUnits.toString(),
         pricePerCsd:         usdcPerCsd,
+        executorFeeAmount:   toUsdcUnits(executorFeeUsdc || "0").toString(),
         validBefore,
       },
     } as any);
@@ -292,7 +294,7 @@ export default function Home() {
       usdc:                USDC_ADDRESS,
       usdcAmount:          usdcAmount,
       minConfirmations:    1n,
-      executorFeeAmount:   0n,
+      executorFeeAmount:   BigInt(selectedOffer?.payload?.executorFeeAmount ?? 0),
       validAfter:          BigInt(now - 60),
       validBefore:         BigInt(now + 3600),
       nonce:               randomHex32(),
@@ -661,6 +663,9 @@ export default function Home() {
                         <div className="muted" style={{ fontSize: 14, marginTop: 3 }}>
                           {formatUsdc(offer.payload.usdcAmount)} USDC
                           {offer.payload.pricePerCsd && ` · ${offer.payload.pricePerCsd} USDC/CSD`}
+                          {Number(offer.payload.executorFeeAmount ?? 0) > 0 && (
+                            <span> · +{formatUsdc(offer.payload.executorFeeAmount)} executor fee</span>
+                          )}
                         </div>
                       </div>
                       {mode === "buy" && (
@@ -879,13 +884,39 @@ export default function Home() {
                     <label>Your USDC recipient</label>
                     <input value={usdcRecipient} onChange={e => setUsdcRecipient(e.target.value)} placeholder={address ?? "0x..."} />
                   </div>
+                  <div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 5 }}>
+                      <label style={{ margin: 0 }}>Executor fee (USDC)</label>
+                      <span className="muted" style={{ fontSize: 12 }}>paid by buyer to whoever settles the trade on-chain</span>
+                    </div>
+                    <input
+                      value={executorFeeUsdc}
+                      onChange={e => setExecutorFeeUsdc(e.target.value)}
+                      placeholder="0"
+                    />
+                    <div className="muted" style={{ marginTop: 6, fontSize: 12, lineHeight: 1.6 }}>
+                      The executor is software that submits the settlement transaction on Ethereum.
+                      A non-zero fee incentivizes third parties to run executors and settle trades faster.
+                      Set to 0 if you are running your own executor or do not need fast settlement.
+                    </div>
+                  </div>
                   <div className="card-inner">
-                    <div className="row-between">
-                      <span className="muted">Total</span>
+                    <div className="row-between" style={{ marginBottom: 6 }}>
+                      <span className="muted">Buyer pays</span>
                       <span style={{ fontSize: 18 }}>
-                        {(Number(csdAmountHuman) * Number(usdcPerCsd)).toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC
+                        {(Number(csdAmountHuman) * Number(usdcPerCsd) + Number(executorFeeUsdc || 0)).toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC
                       </span>
                     </div>
+                    <div className="row-between" style={{ fontSize: 13 }}>
+                      <span className="muted">You receive</span>
+                      <span className="muted">{(Number(csdAmountHuman) * Number(usdcPerCsd)).toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC</span>
+                    </div>
+                    {Number(executorFeeUsdc) > 0 && (
+                      <div className="row-between" style={{ fontSize: 13, marginTop: 2 }}>
+                        <span className="muted">Executor receives</span>
+                        <span className="muted">{Number(executorFeeUsdc).toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC</span>
+                      </div>
+                    )}
                   </div>
                   <button
                     className="btn"

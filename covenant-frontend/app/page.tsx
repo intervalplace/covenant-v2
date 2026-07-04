@@ -1,5 +1,6 @@
 "use client";
 
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 import { useEffect, useState, useCallback } from "react";
 import {
   useAccount, useConnect, useDisconnect,
@@ -14,12 +15,12 @@ import {
 } from "@/config";
 import {
   aonPutObject, fetchSellOffers, fetchBuyerAuthForOffer, fetchMyBuyerAuth,
-  fetchReceipt, fetchCsdProof, fetchCsdBalance,
+  fetchReceipt, fetchCsdProof, fetchCsdBalance, fetchCompletedTrades,
   randomHex32, csdAddrToBytes32,
   shortHash, formatCsd, formatUsdc, secondsLeft, formatCountdown,
 } from "@/aon";
 import { erc20Abi, csdUsdcSettlementAbi } from "@/abi";
-import type { SellOffer, BuyerAuth, TradeMode, Log } from "@/types";
+import type { SellOffer, BuyerAuth, TradeMode, Log, CompletedTrade } from "@/types";
 
 // Direct import — finalizeObject is pure JS, safe for both SSR and browser
 import { finalizeObject as finalizeObj } from "@intervalplace/aon-sdk";
@@ -88,7 +89,8 @@ export default function Home() {
   const [settledTx,     setSettledTx]     = useState<string>("");
 
   // Market data
-  const [sellBook, setSellBook] = useState<SellOffer[]>([]);
+  const [sellBook,       setSellBook]       = useState<SellOffer[]>([]);
+  const [completedTrades, setCompletedTrades] = useState<CompletedTrade[]>([]);
 
   // Seller proof submission
   const [csdTxid, setCsdTxid] = useState("");
@@ -129,8 +131,12 @@ export default function Home() {
 
   const refresh = useCallback(async () => {
     try {
-      // Sell book
-      const offers = await fetchSellOffers();
+      // Sell book + completed trades
+      const [offers, trades] = await Promise.all([
+        fetchSellOffers(),
+        fetchCompletedTrades(),
+      ]);
+      setCompletedTrades(trades);
       setSellBook(offers.filter(o => o.payload.seller.toLowerCase() !== address?.toLowerCase()));
 
       // My sell offer
@@ -648,6 +654,13 @@ export default function Home() {
               ) : (
                 // No auth yet — show buy form
                 <div className="col">
+                  <div className="card-inner" style={{ borderColor: "rgba(255,214,102,0.15)" }}>
+                    <div className="faint">Trade limit</div>
+                    <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
+                      Maximum 100 USDC per trade. This limit is enforced by the settlement contract
+                      to bound risk on 1-confirmation CSD settlement.
+                    </div>
+                  </div>
                   <div>
                     <label>Your CSD receive address (0x + 40 hex)</label>
                     <input
@@ -683,6 +696,13 @@ export default function Home() {
                     >
                       {loading ?? "Approve USDC"}
                     </button>
+                  ) : BigInt(selectedOffer.payload.usdcAmount) > 100_000_000n ? (
+                    <div className="card-inner" style={{ borderColor: "rgba(255,107,107,0.25)" }}>
+                      <div className="danger" style={{ fontSize: 14 }}>
+                        This offer exceeds the 100 USDC contract limit and cannot be settled.
+                        Contact the seller to split into smaller trades.
+                      </div>
+                    </div>
                   ) : (
                     <button
                       className="btn"
@@ -707,6 +727,12 @@ export default function Home() {
               {!mySellOffer ? (
                 // Create sell offer form
                 <div className="col">
+                  <div className="card-inner" style={{ borderColor: "rgba(255,214,102,0.15)" }}>
+                    <div className="faint">Trade limit</div>
+                    <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
+                      Maximum 100 USDC per trade, enforced by the settlement contract.
+                    </div>
+                  </div>
                   <div>
                     <label>CSD amount</label>
                     <input value={csdAmountHuman} onChange={e => setCsdAmountHuman(e.target.value)} />
@@ -856,6 +882,100 @@ export default function Home() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+
+      {/* ── Price chart ─────────────────────────────────────────────────────── */}
+      {completedTrades.length > 1 && (() => {
+        const chartData = [...completedTrades]
+          .reverse()
+          .map((t, i) => ({
+            i,
+            price: Math.round(t.pricePerCsd * 10000) / 10000,
+            label: new Date(t.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+          }));
+        const prices = chartData.map(d => d.price);
+        const minP = Math.min(...prices), maxP = Math.max(...prices);
+        const pad = (maxP - minP) * 0.15 || 0.01;
+        return (
+          <div className="card" style={{ marginTop: 18 }}>
+            <div className="row-between" style={{ marginBottom: 16 }}>
+              <div>
+                <div className="faint">CSD / USDC price</div>
+                <div style={{ fontSize: 26, marginTop: 4 }}>
+                  {chartData[chartData.length - 1]?.price.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                  <span className="muted" style={{ fontSize: 14, marginLeft: 8 }}>USDC / CSD</span>
+                </div>
+              </div>
+              <div className="col" style={{ alignItems: "flex-end", gap: 4 }}>
+                <div className="muted" style={{ fontSize: 12 }}>{completedTrades.length} trade{completedTrades.length !== 1 ? "s" : ""}</div>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {minP.toFixed(4)} – {maxP.toFixed(4)}
+                </div>
+              </div>
+            </div>
+            <ResponsiveContainer width="100%" height={160}>
+              <LineChart data={chartData} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+                <XAxis dataKey="label" tick={{ fill: "var(--faint)", fontSize: 11 }} axisLine={false} tickLine={false} />
+                <YAxis domain={[minP - pad, maxP + pad]} tick={{ fill: "var(--faint)", fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={v => v.toFixed(3)} />
+                <Tooltip
+                  contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, fontSize: 13 }}
+                  labelStyle={{ color: "var(--muted)" }}
+                  formatter={(v: any) => [`${Number(v).toFixed(4)} USDC/CSD`, "Price"]}
+                />
+                <Line type="monotone" dataKey="price" stroke="var(--accent)" strokeWidth={2} dot={{ fill: "var(--accent)", r: 3 }} activeDot={{ r: 5 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        );
+      })()}
+
+      {/* ── Completed trades ─────────────────────────────────────────────────── */}
+      {completedTrades.length > 0 && (
+        <div className="card" style={{ marginTop: 18 }}>
+          <div className="faint" style={{ marginBottom: 14 }}>Completed trades</div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                  {["Time", "CSD", "USDC", "Price", "Buyer", "Tx"].map(h => (
+                    <th key={h} style={{ textAlign: "left", padding: "0 12px 10px 0", color: "var(--muted)", fontWeight: 400, fontSize: 12, textTransform: "uppercase", letterSpacing: "0.06em" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {completedTrades.map(t => (
+                  <tr key={t.receiptHash} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                    <td style={{ padding: "10px 12px 10px 0", color: "var(--muted)" }}>
+                      {new Date(t.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                    </td>
+                    <td style={{ padding: "10px 12px 10px 0" }}>{formatCsd(t.csdAmount)}</td>
+                    <td style={{ padding: "10px 12px 10px 0" }}>{formatUsdc(t.usdcAmount)}</td>
+                    <td style={{ padding: "10px 12px 10px 0", color: "var(--accent)" }}>
+                      {t.pricePerCsd.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                    </td>
+                    <td style={{ padding: "10px 12px 10px 0", fontFamily: "var(--mono)", color: "var(--muted)" }}>
+                      {short(t.buyer)}
+                    </td>
+                    <td style={{ padding: "10px 12px 10px 0" }}>
+                      {t.executionTx ? (
+                        <a href={`https://etherscan.io/tx/${t.executionTx}`} target="_blank" rel="noreferrer"
+                          style={{ color: "var(--muted)", fontSize: 12 }}>
+                          {shortHash(t.executionTx, 4)} ↗
+                        </a>
+                      ) : (
+                        <a href={`https://explorer.aon.network`} target="_blank" rel="noreferrer"
+                          style={{ color: "var(--muted)", fontSize: 12 }}>
+                          AON ↗
+                        </a>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 

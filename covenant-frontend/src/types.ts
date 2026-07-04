@@ -11,6 +11,7 @@ export type SellOffer = {
     csdAmount:           string;
     usdcAmount:          string;
     pricePerCsd:         string | null;
+    executorFeeAmount:   string;
     validBefore:         number;
   };
   createdAt: number;

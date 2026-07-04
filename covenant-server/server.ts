@@ -27,30 +27,33 @@ const u64le  = (n: bigint)  => { const b = Buffer.alloc(8); b.writeBigUInt64LE(n
 // The proof is deterministic given the same inputs so the same txid
 // always produces the same valid proof.
 
-app.get<{ Params: { txid: string } }>("/v1/csd/proof/mock/:txid", async (req) => {
-  const { txid } = req.params;
+app.get("/v1/csd/proof/mock/:txid", async (req) => {
+  const { txid } = (req.params as any);
+  const prevHex   = (req.query as any).prev ?? ("aa".repeat(32));
+  const cleanPrev = prevHex.replace("0x", "").padStart(64, "0");
 
-  // Synthetic seller script (20 bytes)
   const sellerScript20 = Buffer.from("cd".repeat(20), "hex");
-  const CSD_AMOUNT     = 100_000_000n; // 1 CSD
+  // amount: the actual CSD satoshis being paid — must match auth.csdAmount
+  const CSD_AMOUNT = BigInt((req.query as any).amount ?? "100000000");
 
-  // Build a fake raw tx that pays to the seller script
+  const seedBuf     = Buffer.from(txid.replace("0x", "").padStart(64, "0").slice(0, 64), "hex");
+  const seedHash    = sha256(seedBuf);
+  const uniqueNonce = seedHash.readUInt32LE(0);
+
   const rawTxBuf = Buffer.concat([
-    u32le(1), u64le(0n), u64le(1n),
+    u32le(uniqueNonce), u64le(0n), u64le(1n),
     u64le(CSD_AMOUNT), u64le(20n), sellerScript20,
   ]);
   const txidBuf = dsha(rawTxBuf);
 
-  // Mine a block on top of the checkpoint
-  const CHECKPOINT    = "0x" + "aa".repeat(32);
-  const TEST_BITS     = 0x1f7fffff;
-  const testMant      = BigInt(TEST_BITS & 0xFFFFFF);
-  const testExp       = BigInt(TEST_BITS >> 24);
-  const TEST_TARGET   = testMant << (8n * (testExp - 3n));
+  const TEST_BITS   = 0x1f7fffff;
+  const testMant    = BigInt(TEST_BITS & 0xFFFFFF);
+  const testExp     = BigInt(TEST_BITS >> 24);
+  const TEST_TARGET = testMant << (8n * (testExp - 3n));
 
-  const prevBuf    = Buffer.from("aa".repeat(32), "hex");
-  const blockTime  = Math.floor(Date.now() / 1000);
-  let validNonce   = 0;
+  const prevBuf   = Buffer.from(cleanPrev, "hex");
+  const blockTime = Math.floor(Date.now() / 1000);
+  let validNonce  = 0;
   let blockHashBuf: Buffer | null = null;
 
   for (let nonce = 0; nonce < 1_000_000; nonce++) {
@@ -78,11 +81,12 @@ app.get<{ Params: { txid: string } }>("/v1/csd/proof/mock/:txid", async (req) =>
         txid: txidHex,
         outputs: [{ script_pubkey: "0x" + sellerScript20.toString("hex"), value: CSD_AMOUNT.toString() }],
       },
-      header: { version: 1, prev: CHECKPOINT, merkle: txidHex, time: blockTime, bits: TEST_BITS, nonce: validNonce },
+      header: { version: 1, prev: "0x" + cleanPrev, merkle: txidHex, time: blockTime, bits: TEST_BITS, nonce: validNonce },
       merkle_branch: [],
     },
   };
 });
+
 
 // ── Real CSD proof proxy ──────────────────────────────────────────────────────
 app.get<{ Params: { txid: string } }>("/v1/csd/proof/:txid", async (req, reply) => {

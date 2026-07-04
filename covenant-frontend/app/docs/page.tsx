@@ -50,9 +50,12 @@ export default function Docs() {
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontWeight: 600, marginBottom: 5 }}>Executor</div>
             <p className="muted" style={{ lineHeight: 1.8 }}>
-              Submits the final settlement transaction on-chain. The executor pays
-              gas but receives no custody over user assets and requires no standing
-              authority. Any party with a valid proof can act as executor.
+              Submits the final settlement transaction on-chain. The executor is
+              permissionless: it does not have to be either party to the trade.
+              Any third party observing the AON network can run executor software,
+              find executable graphs, and settle them. The executor pays gas but
+              holds no custody and requires no standing authority. Multiple executors
+              can run simultaneously with no coordination between them.
             </p>
           </div>
           <div>
@@ -71,10 +74,12 @@ export default function Docs() {
             Covenant has no backend. All state (sell offers, buyer authorizations,
             payment proofs, receipts) lives on{" "}
             <a href="https://aon.network" target="_blank" rel="noreferrer">AON</a>,
-            a peer-to-peer network of content-addressed objects. There is no Covenant
-            database. If Covenant's interface disappeared tomorrow, every object would
-            still exist on the network and any executor could settle outstanding trades
-            directly against the contracts.
+            a peer-to-peer network of content-addressed objects. Settlement is
+            permissionless: any third party observing the network can run executor
+            software, find executable graphs, and settle them without asking anyone.
+            There is no Covenant database. If the Covenant interface disappeared
+            tomorrow, every object would still exist on the network and any executor
+            could settle outstanding trades directly against the contracts.
           </p>
           <p className="muted" style={{ lineHeight: 1.8 }}>
             Settlement is enforced by a{" "}

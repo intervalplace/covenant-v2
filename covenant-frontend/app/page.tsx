@@ -230,6 +230,11 @@ export default function Home() {
     if (!address || !finalizeObj) return;
     const csdSats = toCsdSatoshis(csdAmountHuman);
     const usdcUnits = toUsdcUnits((Number(csdAmountHuman) * Number(usdcPerCsd)).toFixed(6));
+    const execFeeUnits = toUsdcUnits(executorFeeUsdc || "0");
+    if (usdcUnits + execFeeUnits > 100_000_000n) {
+      setStatus("Total USDC (trade + executor fee) cannot exceed 100 USDC. This limit is enforced by the settlement contract.");
+      return;
+    }
     const validBefore = Math.floor(Date.now() / 1000) + 86400; // 24h
 
     const obj = finalizeObj({

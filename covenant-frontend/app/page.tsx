@@ -815,19 +815,51 @@ export default function Home() {
                   </div>
 
                   <div className="card-inner">
-                    <div className="row-between">
-                      <span className="muted">USDC balance</span>
-                      <span>{formatUsdc(usdcBalance)} USDC</span>
-                    </div>
-                    <div className="row-between" style={{ marginTop: 8 }}>
-                      <span className="muted">USDC approved</span>
-                      <span className={usdcAllowance >= BigInt(selectedOffer.payload.usdcAmount) ? "accent" : "warn"}>
-                        {usdcAllowance >= BigInt(selectedOffer.payload.usdcAmount) ? "✓ sufficient" : "insufficient"}
-                      </span>
-                    </div>
+                    {(() => {
+                      const tradeUsdc = BigInt(selectedOffer.payload.usdcAmount);
+                      const execFee   = BigInt(selectedOffer.payload.executorFeeAmount ?? 0);
+                      const totalUsdc = tradeUsdc + execFee;
+                      const sufficient = usdcAllowance >= totalUsdc;
+                      return (
+                        <>
+                          <div className="row-between">
+                            <span className="muted">Trade amount</span>
+                            <span>{formatUsdc(tradeUsdc.toString())} USDC</span>
+                          </div>
+                          {execFee > 0n && (
+                            <div className="row-between" style={{ marginTop: 6 }}>
+                              <span className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                Executor fee
+                                <span style={{ fontSize: 11, color: "var(--faint)", fontStyle: "italic" }}>set by seller</span>
+                              </span>
+                              <span className="muted">{formatUsdc(execFee.toString())} USDC</span>
+                            </div>
+                          )}
+                          <div className="row-between" style={{
+                            marginTop: execFee > 0n ? 8 : 4,
+                            paddingTop: execFee > 0n ? 8 : 0,
+                            borderTop: execFee > 0n ? "1px solid var(--border)" : "none",
+                            fontWeight: 500,
+                          }}>
+                            <span className="muted">Total you pay</span>
+                            <span>{formatUsdc(totalUsdc.toString())} USDC</span>
+                          </div>
+                          <div className="row-between" style={{ marginTop: 8 }}>
+                            <span className="muted">USDC balance</span>
+                            <span>{formatUsdc(usdcBalance)} USDC</span>
+                          </div>
+                          <div className="row-between" style={{ marginTop: 6 }}>
+                            <span className="muted">USDC approved</span>
+                            <span className={sufficient ? "accent" : "warn"}>
+                              {sufficient ? "✓ sufficient" : "insufficient"}
+                            </span>
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
 
-                  {usdcAllowance < BigInt(selectedOffer.payload.usdcAmount) ? (
+                  {usdcAllowance < BigInt(selectedOffer.payload.usdcAmount) + BigInt(selectedOffer.payload.executorFeeAmount ?? 0) ? (
                     <button
                       className="btn"
                       onClick={approveUsdc}
@@ -835,7 +867,7 @@ export default function Home() {
                     >
                       {loading ?? "Approve USDC"}
                     </button>
-                  ) : BigInt(selectedOffer.payload.usdcAmount) > 100_000_000n ? (
+                  ) : BigInt(selectedOffer.payload.usdcAmount) + BigInt(selectedOffer.payload.executorFeeAmount ?? 0) > 100_000_000n ? (
                     <div className="card-inner" style={{ borderColor: "rgba(192,57,43,0.18)" }}>
                       <div className="danger" style={{ fontSize: 14 }}>
                         This offer exceeds the 100 USDC contract limit and cannot be settled.

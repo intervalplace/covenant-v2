@@ -35,7 +35,13 @@ export async function fetchSellOffers(): Promise<SellOffer[]> {
   return (data.objects ?? [])
     .filter((o: any) => {
       const p = o.payload;
-      return p?.validBefore > now && BigInt(p?.csdAmount ?? 0) > 0n;
+      if (!p || p.validBefore <= now) return false;
+      if (BigInt(p?.csdAmount ?? 0) <= 0n) return false;
+      // Filter out offers that exceed the contract's 100 USDC per trade limit
+      const tradeUsdc = BigInt(p?.usdcAmount ?? 0);
+      const execFee   = BigInt(p?.executorFeeAmount ?? 0);
+      if (tradeUsdc + execFee > 100_000_000n) return false;
+      return true;
     })
     .map((o: any) => ({
       objectHash: o.objectHash,
@@ -97,6 +103,10 @@ export async function fetchCompletedTrades(): Promise<import("./types").Complete
 
   const trades: import("./types").CompletedTrade[] = [];
 
+  // Real Ethereum tx hashes are 0x + 64 hex chars.
+  // Simulated receipts use strings like "simulated:aon:csd-usdc:0x..." — exclude them.
+  const isRealTx = (tx: string) => /^0x[0-9a-fA-F]{64}$/.test(tx ?? "");
+
   for (const receipt of receiptsData.objects ?? []) {
     // receipt.references = [authObjHash, reserveObjHash, proofObjHash]
     const authHash = receipt.references?.[0];
@@ -107,6 +117,9 @@ export async function fetchCompletedTrades(): Promise<import("./types").Complete
 
     const a = auth.payload?.authorization;
     if (!a?.csdAmount || !a?.usdcAmount) continue;
+
+    const executionTx = receipt.payload?.executionTx ?? "";
+    if (!isRealTx(executionTx)) continue; // skip simulated and test receipts
 
     const csdHuman  = Number(a.csdAmount)  / 1e8;
     const usdcHuman = Number(a.usdcAmount) / 1e6;
@@ -119,7 +132,7 @@ export async function fetchCompletedTrades(): Promise<import("./types").Complete
       pricePerCsd:         csdHuman > 0 ? usdcHuman / csdHuman : 0,
       buyer:               a.buyer,
       sellerUsdcRecipient: a.sellerUsdcRecipient,
-      executionTx:         receipt.payload?.executionTx ?? "",
+      executionTx,
       timestamp:           receipt.createdAt ?? Date.now(),
     });
   }

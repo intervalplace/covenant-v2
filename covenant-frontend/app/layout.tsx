@@ -23,8 +23,7 @@ function Nav() {
       zIndex: 100,
     }}>
       <Link href="/" style={{
-        fontFamily: "var(--serif)",
-        fontSize: 15,
+        fontSize: 16,
         letterSpacing: "0.01em",
         color: "var(--fg)",
       }}>

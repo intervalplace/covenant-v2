@@ -99,6 +99,8 @@ export default function Home() {
 
   // Balances
   const [csdBalance, setCsdBalance] = useState<bigint>(0n);
+  const [nodeUnreachable, setNodeUnreachable] = useState(false);
+  const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [nowSecs,    setNowSecs]    = useState(Math.floor(Date.now() / 1000));
 
   const addLog = (text: string) =>
@@ -133,6 +135,7 @@ export default function Home() {
 
   const refresh = useCallback(async () => {
     try {
+      setNodeUnreachable(false);
       // Sell book + completed trades
       const [offers, trades] = await Promise.all([
         fetchSellOffers(),
@@ -209,6 +212,11 @@ export default function Home() {
       }
     } catch (err: any) {
       console.error("refresh error", err);
+      if (err?.message?.includes("fetch") || err?.message?.includes("network") || err?.message?.includes("ECONNREFUSED")) {
+        setNodeUnreachable(true);
+      }
+    } finally {
+      setInitialLoadDone(true);
     }
   }, [address, publicClient]);
 
@@ -267,11 +275,14 @@ export default function Home() {
     if (DEMO_MODE) { setStatus("Demo mode: USDC pre-approved."); return; }
     setLoading("Approving USDC...");
     try {
-      await writeContractAsync({
+      setLoading("Approving USDC...");
+      const approveTx = await writeContractAsync({
         address: USDC_ADDRESS, abi: erc20Abi,
         functionName: "approve",
         args: [SETTLEMENT_CONTRACT, maxUint256],
       });
+      setLoading("Waiting for confirmation...");
+      await publicClient?.waitForTransactionReceipt({ hash: approveTx });
       addLog("USDC approved.");
       setStatus("USDC approved. You can now authorize the trade.");
     } finally { setLoading(null); }
@@ -355,6 +366,22 @@ export default function Home() {
     } finally { setLoading(null); }
   }
 
+  async function cancelSellOffer() {
+    if (!mySellOffer || !finalizeObj) return;
+    setLoading("Cancelling offer...");
+    try {
+      const revocation = finalizeObj({
+        objectType: "revocation", schemaVersion: "1", namespace: "aon:csd-usdc",
+        createdAt: Date.now(), references: [mySellOffer.objectHash],
+        payload: { reason: "seller_cancelled" },
+      } as any);
+      await aonPutObject(revocation);
+      setMySellOffer(null);
+      setStatus("Sell offer cancelled.");
+      addLog(`Offer cancelled: ${mySellOffer.objectHash}`);
+    } finally { setLoading(null); }
+  }
+
   // Seller locks USDC — called by seller once they're ready to send CSD
   async function lockSettlement() {
     if (!matchedAuth || !address) return;
@@ -388,12 +415,15 @@ export default function Home() {
 
     setLoading("Locking USDC...");
     try {
-      const tx = await writeContractAsync({
+      setLoading("Locking USDC...");
+      const lockHash = await writeContractAsync({
         address: SETTLEMENT_CONTRACT, abi: csdUsdcSettlementAbi,
         functionName: "lockCsdUsdcAuthorization",
         args: [authTuple, matchedAuth.signature.signature],
       });
-      addLog(`Lock tx: ${tx}`);
+      setLoading("Waiting for confirmation...");
+      await publicClient?.waitForTransactionReceipt({ hash: lockHash });
+      addLog(`Lock tx: ${lockHash}`);
       setStatus("USDC locked. You can now safely send CSD to the buyer's address.");
       await refresh();
     } finally { setLoading(null); }
@@ -560,17 +590,17 @@ export default function Home() {
 
       {/* Header */}
       <header style={{ marginBottom: 56 }}>
-        <div className="row-between" style={{ marginBottom: 32 }}>
+        <div className="page-header">
           <div>
             <div style={{ fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>Covenant</div>
-            <h1 style={{ fontSize: 44, lineHeight: 1.1, margin: "12px 0 0", maxWidth: 700, fontFamily: "var(--serif)", fontWeight: "normal" }}>
+            <h1 style={{ fontSize: 44, lineHeight: 1.1, margin: "12px 0 0", maxWidth: 700 }}>
               Execution no longer requires trust.
             </h1>
             <p className="muted" style={{ marginTop: 12, maxWidth: 600, fontSize: 17 }}>
               CSD/USDC settlement. Trustless, on-chain SPV verified.
             </p>
           </div>
-          <div className="col" style={{ alignItems: "flex-end", gap: 12 }}>
+          <div className="page-header-right">
             <div className="row">
               {isConnected ? (
                 <>
@@ -612,6 +642,20 @@ export default function Home() {
         </div>
       )}
 
+      {/* Node unreachable banner */}
+      {nodeUnreachable && (
+        <div style={{
+          background: "rgba(192,57,43,0.06)", border: "1px solid rgba(192,57,43,0.2)",
+          borderRadius: 5, padding: "10px 16px", marginBottom: 18,
+          display: "flex", alignItems: "center", gap: 10,
+        }}>
+          <span className="danger" style={{ fontSize: 13, fontWeight: 500 }}>Cannot reach AON node</span>
+          <span className="muted" style={{ fontSize: 13 }}>
+            Retrying automatically. The network may be temporarily unavailable.
+          </span>
+        </div>
+      )}
+
       {/* Status banner */}
       {status && (
         <div className="card" style={{ marginBottom: 18, borderColor: "rgba(26,102,64,0.10)" }}>
@@ -640,13 +684,17 @@ export default function Home() {
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, alignItems: "start" }}>
+      <div className="market-grid">
 
         {/* Sell book */}
         <div className="col">
           <div className="card">
             <div className="faint" style={{ marginBottom: 14 }}>Sell book</div>
-            {sellBook.length === 0 ? (
+            {nodeUnreachable ? (
+              <div className="muted" style={{ fontSize: 13 }}>Cannot reach network.</div>
+            ) : !initialLoadDone ? (
+              <div className="muted">Loading...</div>
+            ) : sellBook.length === 0 ? (
               <div className="muted">No open sell offers.</div>
             ) : (
               <div className="col" style={{ gap: 8 }}>
@@ -709,7 +757,7 @@ export default function Home() {
             <div className="card grid">
               <div>
                 <div className="faint" style={{ marginBottom: 8 }}>Buy CSD</div>
-                <h2 style={{ margin: 0, fontFamily: "var(--serif)", fontWeight: "normal" }}>
+                <h2 style={{ margin: 0 }}>
                   {selectedOffer
                     ? `${formatCsd(selectedOffer.payload.csdAmount)} CSD for ${formatUsdc(selectedOffer.payload.usdcAmount)} USDC`
                     : "Select a sell offer"}
@@ -757,7 +805,7 @@ export default function Home() {
                       </div>
                       {windowRemaining > 0 ? (
                         <div style={{ marginTop: 14, display: "flex", alignItems: "baseline", gap: 8 }}>
-                          <span style={{ fontFamily: "var(--serif)", fontSize: 36, lineHeight: 1 }}>
+                          <span style={{ fontSize: 36, lineHeight: 1 }}>
                             {formatCountdown(windowRemaining)}
                           </span>
                           <span className="muted" style={{ fontSize: 13 }}>remaining</span>
@@ -775,21 +823,35 @@ export default function Home() {
 
                   {settlementStatus === "auth_active" && (() => {
                     const expiresIn = secondsLeft(myBuyerAuth!.payload.authorization.validBefore);
-                    const urgent = expiresIn < 600; // under 10 minutes
-                    return (
+                    const urgent = expiresIn < 600;
+                    const expired = expiresIn === 0;
+                    return expired ? (
+                      <div className="card-inner">
+                        <div className="warn" style={{ fontWeight: 500, marginBottom: 8 }}>Authorization expired</div>
+                        <div className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+                          The seller did not lock USDC before your authorization expired. Create a new one to try again.
+                        </div>
+                        <button className="btn" onClick={() => {
+                          setMyBuyerAuth(null);
+                          setSettlementStatus("none");
+                          setSelectedOffer(null);
+                        }}>
+                          Start over
+                        </button>
+                      </div>
+                    ) : (
                       <div className="card-inner">
                         <div className="faint">Authorization expires in</div>
                         <div style={{ marginTop: 14, display: "flex", alignItems: "baseline", gap: 8 }}>
                           <span style={{
-                            fontFamily: "var(--serif)", fontSize: 36, lineHeight: 1,
+                            fontSize: 36, lineHeight: 1,
                             color: urgent ? "var(--warn)" : "var(--fg)",
                           }}>
                             {formatCountdown(expiresIn)}
                           </span>
                         </div>
                         <div className="muted" style={{ marginTop: 12, fontSize: 13 }}>
-                          Waiting for seller to lock USDC. If the seller does not lock before expiry,
-                          create a new authorization.
+                          Waiting for seller to lock USDC.
                         </div>
                       </div>
                     );
@@ -798,6 +860,9 @@ export default function Home() {
               ) : (
                 // No auth yet — show buy form
                 <div className="col">
+                  {!initialLoadDone && isConnected && (
+                    <div className="muted" style={{ fontSize: 13 }}>Checking your active trades...</div>
+                  )}
                   <div className="card-inner" style={{ borderColor: "rgba(154,104,0,0.10)" }}>
                     <div className="faint">Trade limit</div>
                     <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
@@ -982,6 +1047,14 @@ export default function Home() {
                   <div className="muted" style={{ fontSize: 14 }}>
                     Waiting for a buyer to create an authorization referencing your offer.
                   </div>
+                  <button
+                    className="btn-secondary"
+                    onClick={cancelSellOffer}
+                    disabled={!!loading}
+                    style={{ fontSize: 13 }}
+                  >
+                    {loading ?? "Cancel offer"}
+                  </button>
                 </div>
               ) : (
                 // Have a buyer auth — show lock + settlement flow
@@ -1022,7 +1095,7 @@ export default function Home() {
                         {windowRemaining > 0 ? (
                           <div style={{ marginTop: 14, display: "flex", alignItems: "baseline", gap: 8 }}>
                             <span style={{
-                              fontFamily: "var(--serif)", fontSize: 36, lineHeight: 1,
+                              fontSize: 36, lineHeight: 1,
                               color: windowRemaining < 180 ? "var(--danger)" : windowRemaining < 600 ? "var(--warn)" : "var(--fg)",
                             }}>
                               {formatCountdown(windowRemaining)}
@@ -1111,7 +1184,7 @@ export default function Home() {
 
       {/* Balances */}
       {isConnected && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginTop: 18 }}>
+        <div className="balance-grid">
           <div className="card">
             <div className="faint">Ethereum wallet</div>
             <div style={{ marginTop: 14 }}>
@@ -1163,11 +1236,11 @@ export default function Home() {
             </div>
             <ResponsiveContainer width="100%" height={160}>
               <LineChart data={chartData} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
-                <XAxis dataKey="label" tick={{ fill: "var(--faint)", fontSize: 11, fontFamily: "var(--font)" }} axisLine={false} tickLine={false} />
-                <YAxis domain={[minP - pad, maxP + pad]} tick={{ fill: "var(--faint)", fontSize: 11, fontFamily: "var(--font)" }} axisLine={false} tickLine={false} tickFormatter={v => v.toFixed(3)} />
+                <XAxis dataKey="label" tick={{ fill: "var(--faint)", fontSize: 11,  }} axisLine={false} tickLine={false} />
+                <YAxis domain={[minP - pad, maxP + pad]} tick={{ fill: "var(--faint)", fontSize: 11,  }} axisLine={false} tickLine={false} tickFormatter={v => v.toFixed(3)} />
                 <Tooltip
                   contentStyle={{ background: "var(--bg)", border: "1px solid var(--border2)", borderRadius: 4, fontSize: 13 }}
-                  labelStyle={{ color: "var(--muted)", fontFamily: "var(--font)" }}
+                  labelStyle={{ color: "var(--muted)",  }}
                   formatter={(v: any) => [`${Number(v).toFixed(4)} USDC/CSD`, "Price"]}
                 />
                 <Line type="monotone" dataKey="price" stroke="var(--green)" strokeWidth={2} dot={{ fill: "var(--green)", r: 3 }} activeDot={{ r: 5 }} />

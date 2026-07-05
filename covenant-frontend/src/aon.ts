@@ -29,18 +29,38 @@ export async function aonPutObject(obj: any): Promise<{ objectHash: string }> {
 
 // ── Sell offers ───────────────────────────────────────────────────────────────
 
+async function fetchRevokedOfferHashes(): Promise<Set<string>> {
+  try {
+    const data = await aonGet("/objects?objectType=revocation&namespace=aon:csd-usdc&limit=100");
+    const revoked = new Set<string>();
+    for (const obj of data.objects ?? []) {
+      for (const ref of (obj.references ?? [])) {
+        revoked.add((ref as string).toLowerCase());
+      }
+    }
+    return revoked;
+  } catch {
+    return new Set();
+  }
+}
+
 export async function fetchSellOffers(): Promise<SellOffer[]> {
-  const data = await aonGet("/objects?objectType=csd_sell_offer&namespace=aon:csd-usdc&limit=100");
-  const now  = Math.floor(Date.now() / 1000);
+  const [data, revoked] = await Promise.all([
+    aonGet("/objects?objectType=csd_sell_offer&namespace=aon:csd-usdc&limit=100"),
+    fetchRevokedOfferHashes(),
+  ]);
+  const now = Math.floor(Date.now() / 1000);
   return (data.objects ?? [])
     .filter((o: any) => {
       const p = o.payload;
       if (!p || p.validBefore <= now) return false;
       if (BigInt(p?.csdAmount ?? 0) <= 0n) return false;
-      // Filter out offers that exceed the contract's 100 USDC per trade limit
+      // Filter offers exceeding the contract's 100 USDC per trade limit
       const tradeUsdc = BigInt(p?.usdcAmount ?? 0);
       const execFee   = BigInt(p?.executorFeeAmount ?? 0);
       if (tradeUsdc + execFee > 100_000_000n) return false;
+      // Filter revoked offers
+      if (revoked.has(o.objectHash?.toLowerCase())) return false;
       return true;
     })
     .map((o: any) => ({

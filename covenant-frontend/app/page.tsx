@@ -1,7 +1,7 @@
 "use client";
 
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   useAccount, useConnect, useDisconnect,
   useReadContract, useReadContracts, useWriteContract, usePublicClient,
@@ -24,6 +24,22 @@ import type { SellOffer, BuyerAuth, TradeMode, Log, CompletedTrade } from "@/typ
 
 // Direct import — finalizeObject is pure JS, safe for both SSR and browser
 import { finalizeObject as finalizeObj } from "@intervalplace/aon-sdk";
+
+// ── Confirmation tier helper ──────────────────────────────────────────────────
+function requiredConfirmations(usdcUnits: bigint): number {
+  if (usdcUnits > 10_000_000_000n) return 6; // >10,000 USDC → 6-conf (up to 25,000 USDC)
+  if (usdcUnits > 5_000_000_000n)  return 5; // >5,000 USDC  → 5-conf (up to 10,000 USDC)
+  if (usdcUnits > 2_000_000_000n)  return 4; // >2,000 USDC  → 4-conf (up to 5,000 USDC)
+  if (usdcUnits > 500_000_000n)    return 3; // >500 USDC    → 3-conf (up to 2,000 USDC)
+  if (usdcUnits > 100_000_000n)    return 2; // >100 USDC    → 2-conf (up to 500 USDC)
+  return 1;                                   // ≤100 USDC    → 1-conf
+}
+
+// Human-readable description of confirmation requirements
+function confDescription(confs: number): string {
+  const mins = confs * 2; // 120s block time
+  return confs === 1 ? "~2 min" : `${confs} blocks (~${mins} min)`;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function short(x?: string) { return x ? `${x.slice(0, 6)}…${x.slice(-4)}` : ""; }
@@ -96,6 +112,9 @@ export default function Home() {
   // Seller proof submission
   const [csdTxid, setCsdTxid] = useState("");
   const [revocationDetected, setRevocationDetected] = useState(false);
+  const [confirmationCount, setConfirmationCount] = useState(0);
+  const [checkingConfs, setCheckingConfs] = useState(false);
+  const pollingRef = useRef<boolean>(false);
 
   // Balances
   const [csdBalance, setCsdBalance] = useState<bigint>(0n);
@@ -223,7 +242,7 @@ export default function Home() {
   useEffect(() => {
     refresh();
     const id = setInterval(refresh, 4000);
-    return () => clearInterval(id);
+    return () => { clearInterval(id); pollingRef.current = false; };
   }, [refresh]);
 
   // CSD balance
@@ -309,7 +328,7 @@ export default function Home() {
       csdAmount:           csdAmount,
       usdc:                USDC_ADDRESS,
       usdcAmount:          usdcAmount,
-      minConfirmations:    1n,
+      minConfirmations:    BigInt(selectedOffer?.payload?.minConfirmations ?? 1),
       executorFeeAmount:   BigInt(selectedOffer?.payload?.executorFeeAmount ?? 0),
       validAfter:          BigInt(now - 60),
       validBefore:         BigInt(now + 3600),
@@ -406,7 +425,7 @@ export default function Home() {
       csdAmount:           BigInt(a.csdAmount),
       usdc:                a.usdc,
       usdcAmount:          BigInt(a.usdcAmount),
-      minConfirmations:    BigInt(a.minConfirmations),
+      minConfirmations:    BigInt(selectedOffer?.payload?.minConfirmations ?? a?.minConfirmations ?? 1),
       executorFeeAmount:   BigInt(a.executorFeeAmount ?? 0),
       validAfter:          BigInt(a.validAfter),
       validBefore:         BigInt(a.validBefore),
@@ -445,7 +464,7 @@ export default function Home() {
       csdAmount:           BigInt(a.csdAmount),
       usdc:                a.usdc,
       usdcAmount:          BigInt(a.usdcAmount),
-      minConfirmations:    BigInt(a.minConfirmations),
+      minConfirmations:    BigInt(selectedOffer?.payload?.minConfirmations ?? a?.minConfirmations ?? 1),
       executorFeeAmount:   BigInt(a.executorFeeAmount ?? 0),
       validAfter:          BigInt(a.validAfter),
       validBefore:         BigInt(a.validBefore),
@@ -488,7 +507,7 @@ export default function Home() {
         csdAmount:           BigInt(a.csdAmount),
         usdc:                a.usdc,
         usdcAmount:          BigInt(a.usdcAmount),
-        minConfirmations:    BigInt(a.minConfirmations),
+        minConfirmations:    BigInt(selectedOffer?.payload?.minConfirmations ?? a?.minConfirmations ?? 1),
         executorFeeAmount:   BigInt(a.executorFeeAmount ?? 0),
         validAfter:          BigInt(a.validAfter),
         validBefore:         BigInt(a.validBefore),
@@ -538,6 +557,34 @@ export default function Home() {
         setStatus(`Error: ${msg.slice(0, 120)}`);
       }
     } finally { setLoading(null); }
+  }
+
+  // Polls the covenant-server until the CSD tx has enough confirmations.
+  // Called when seller enters a txid — shows live progress before enabling submit.
+  async function pollConfirmations(txid: string) {
+    if (!txid || !matchedAuth) return;
+    const required = Number(matchedAuth.payload.authorization.minConfirmations ?? 1);
+    // Cancel any in-progress poll before starting a new one
+    pollingRef.current = false;
+    await new Promise(r => setTimeout(r, 50)); // let previous loop exit
+    pollingRef.current = true;
+    setCheckingConfs(true);
+    setConfirmationCount(0);
+    try {
+      while (pollingRef.current) {
+        const pr = await fetchCsdProof(txid.trim(), required).catch(() => null);
+        if (!pollingRef.current) break; // cancelled while awaiting
+        const count = pr?.confirmations ?? 0;
+        setConfirmationCount(count);
+        if (count >= required) break;
+        // Wait 15s but check cancellation every 500ms
+        for (let i = 0; i < 30 && pollingRef.current; i++) {
+          await new Promise(r => setTimeout(r, 500));
+        }
+      }
+    } finally {
+      setCheckingConfs(false);
+    }
   }
 
   // Seller submits CSD txid — creates proof object on AON
@@ -718,6 +765,9 @@ export default function Home() {
                           {offer.payload.pricePerCsd && ` · ${offer.payload.pricePerCsd} USDC/CSD`}
                           {Number(offer.payload.executorFeeAmount ?? 0) > 0 && (
                             <span> · +{formatUsdc(offer.payload.executorFeeAmount)} executor fee</span>
+                          )}
+                          {Number(offer.payload.minConfirmations ?? 1) > 1 && (
+                            <span> · {offer.payload.minConfirmations}-conf</span>
                           )}
                         </div>
                       </div>
@@ -1030,6 +1080,16 @@ export default function Home() {
                         <span className="muted">{Number(executorFeeUsdc).toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC</span>
                       </div>
                     )}
+                    {(() => {
+                      const usdcUnits = toUsdcUnits((Number(csdAmountHuman) * Number(usdcPerCsd)).toFixed(6));
+                      const confs = requiredConfirmations(usdcUnits);
+                      return confs > 1 ? (
+                        <div className="row-between" style={{ fontSize: 13, marginTop: 2 }}>
+                          <span className="muted">Confirmations required</span>
+                          <span className="muted">{confDescription(confs)}</span>
+                        </div>
+                      ) : null;
+                    })()}
                   </div>
                   <button
                     className="btn"
@@ -1157,17 +1217,40 @@ export default function Home() {
                         <label>CSD transaction ID</label>
                         <input
                           value={csdTxid}
-                          onChange={e => setCsdTxid(e.target.value)}
+                          onChange={e => {
+                            setCsdTxid(e.target.value);
+                            setConfirmationCount(0);
+                            pollingRef.current = false;
+                          }}
+                          onBlur={e => { if (e.target.value.length > 10) pollConfirmations(e.target.value); }}
                           placeholder="0x..."
                         />
                       </div>
+
+                      {/* Confirmation progress */}
+                      {csdTxid.length > 10 && (() => {
+                        const required = Number(matchedAuth?.payload?.authorization?.minConfirmations ?? 1);
+                        const ready = confirmationCount >= required;
+                        return (
+                          <div style={{ fontSize: 13, color: ready ? "var(--green)" : "var(--muted)" }}>
+                            {checkingConfs && !ready
+                              ? `Checking confirmations...`
+                              : ready
+                                ? `✓ ${confirmationCount}/${required} confirmations`
+                                : confirmationCount > 0
+                                  ? `${confirmationCount}/${required} confirmations — waiting for ${required - confirmationCount} more block${required - confirmationCount !== 1 ? "s" : ""}...`
+                                  : `${required} confirmation${required !== 1 ? "s" : ""} required (~${required * 2} min)`
+                            }
+                          </div>
+                        );
+                      })()}
 
                       {revocationDetected ? (
                         <button
                           className="btn-danger"
                           style={{ fontWeight: 600 }}
                           onClick={settleDirectly}
-                          disabled={!csdTxid || !!loading}
+                          disabled={!csdTxid || !!loading || confirmationCount < Number(matchedAuth?.payload?.authorization?.minConfirmations ?? 1)}
                         >
                           {loading ?? "Settle directly (bypass executor)"}
                         </button>
@@ -1175,7 +1258,7 @@ export default function Home() {
                         <button
                           className="btn"
                           onClick={submitCsdProof}
-                          disabled={!csdTxid || !!loading}
+                          disabled={!csdTxid || !!loading || confirmationCount < Number(matchedAuth?.payload?.authorization?.minConfirmations ?? 1)}
                         >
                           {loading ?? "Verify payment + settle"}
                         </button>

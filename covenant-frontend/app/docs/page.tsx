@@ -55,14 +55,14 @@ export default function Docs() {
       <p className="muted">
         Verifies authorization signatures, validity windows, and payment proofs
         before releasing funds. Enforces all settlement conditions on-chain.
-        Maximum 100 USDC per trade, enforced in the contract rather than the interface.
+        Scaling USDC amount limits per trade depending on number of confirmations, enforced in the contract rather than the interface.
       </p>
 
       <hr style={{ margin: "34px 0", border: "none", borderTop: "1px solid #ddd" }} />
 
       <h2>What runs underneath</h2>
       <p className="muted" style={{ marginTop: 12 }}>
-        Covenant has no backend. All state (sell offers, buyer authorizations,
+        Covenant maintains no application state. All state (sell offers, buyer authorizations,
         payment proofs, receipts) lives on{" "}
         <a href="https://aon.network" target="_blank" rel="noreferrer">AON</a>,
         a peer-to-peer network of content-addressed objects. Settlement is
@@ -126,7 +126,7 @@ export default function Docs() {
         <li>Settlement requires proof matching the signed authorization.</li>
         <li>Genesis hash, script hash, amount, and consumed-tx state are checked on-chain.</li>
         <li>Tampered transactions are rejected via merkle proof verification.</li>
-        <li>Maximum 100 USDC per trade, enforced in the settlement contract.</li>
+        <li>Enforced USDC limits per trade, enforced in the settlement contract.</li>
       </ul>
 
       <hr style={{ margin: "34px 0", border: "none", borderTop: "1px solid #ddd" }} />
@@ -135,9 +135,9 @@ export default function Docs() {
       <p className="muted" style={{ marginTop: 12 }}>
         Covenant is experimental software. The 100 USDC per trade limit reflects
         1-confirmation settlement on an early-stage proof-of-work chain. Settlement
-        is trustless — the contract does not rely on Covenant or any operator — but
+        is trustless and the contract does not rely on Covenant or any operator, but
         trade sizes are bounded to match current network security assumptions.
-        The limit will increase as Compute Substrate hashrate grows.
+        The limits will increase as Compute Substrate hashrate grows.
       </p>
 
       <p className="muted" style={{ marginTop: 40, fontSize: 15 }}>

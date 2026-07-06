@@ -721,15 +721,26 @@ export default function Home() {
                           )}
                         </div>
                       </div>
-                      {mode === "buy" && (
-                        <button
-                          className="btn-accent"
-                          style={{ fontSize: 13, padding: "6px 14px" }}
-                          onClick={(e) => { e.stopPropagation(); setSelectedOffer(offer); }}
-                        >
-                          Select
-                        </button>
-                      )}
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                        {mode === "buy" && (
+                          <button
+                            className="btn-accent"
+                            style={{ fontSize: 13, padding: "4px 12px" }}
+                            onClick={(e) => { e.stopPropagation(); setSelectedOffer(offer); }}
+                          >
+                            Select
+                          </button>
+                        )}
+                        {(() => {
+                          const secs = secondsLeft(offer.payload.validBefore);
+                          const urgent = secs < 3600;
+                          return (
+                            <span style={{ fontSize: 12, color: urgent ? "var(--warn)" : "var(--muted)" }}>
+                              {urgent ? "expires " : ""}{formatCountdown(secs)}
+                            </span>
+                          );
+                        })()}
+                      </div>
                     </div>
                     <div className="mono faint" style={{ marginTop: 8 }}>
                       {shortHash(offer.objectHash)} ·{" "}

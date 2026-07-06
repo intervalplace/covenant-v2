@@ -258,8 +258,12 @@ export default function Home() {
     const csdSats = toCsdSatoshis(csdAmountHuman);
     const usdcUnits = toUsdcUnits((Number(csdAmountHuman) * Number(usdcPerCsd)).toFixed(6));
     const execFeeUnits = toUsdcUnits(executorFeeUsdc || "0");
-    if (usdcUnits + execFeeUnits > 100_000_000n) {
-      setStatus("Total USDC (trade + executor fee) cannot exceed 100 USDC. This limit is enforced by the settlement contract.");
+    // Tiered cap: check against the contract limit for the auto-selected confirmation tier
+    const confs = requiredConfirmations(usdcUnits);
+    const capsUsdc: Record<number, bigint> = { 1: 100_000_000n, 2: 500_000_000n, 3: 2_000_000_000n, 4: 5_000_000_000n, 5: 10_000_000_000n, 6: 25_000_000_000n };
+    const maxUsdc = capsUsdc[confs] ?? 25_000_000_000n;
+    if (usdcUnits > maxUsdc) {
+      setStatus(`${confs}-confirmation trades are capped at ${formatUsdc(String(maxUsdc))} USDC by the settlement contract.`);
       return;
     }
     const validBefore = Math.floor(Date.now() / 1000) + 86400; // 24h
@@ -927,8 +931,9 @@ export default function Home() {
                   <div className="card-inner" style={{ borderColor: "rgba(154,104,0,0.10)" }}>
                     <div className="faint">Trade limit</div>
                     <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-                      Maximum 100 USDC per trade. This limit is enforced by the settlement contract
-                      to bound risk on 1-confirmation CSD settlement.
+                      Trade size limits scale with confirmation depth: 100 USDC (1-conf),
+                      500 USDC (2-conf), 2,000 USDC (3-conf), up to 25,000 USDC (6-conf).
+                      Enforced by the settlement contract.
                     </div>
                   </div>
                   <div>
@@ -990,30 +995,29 @@ export default function Home() {
                     })()}
                   </div>
 
-                  {usdcAllowance < BigInt(selectedOffer.payload.usdcAmount) + BigInt(selectedOffer.payload.executorFeeAmount ?? 0) ? (
-                    <button
-                      className="btn"
-                      onClick={approveUsdc}
-                      disabled={!isConnected || !!loading}
-                    >
-                      {loading ?? "Approve USDC"}
-                    </button>
-                  ) : BigInt(selectedOffer.payload.usdcAmount) + BigInt(selectedOffer.payload.executorFeeAmount ?? 0) > 100_000_000n ? (
-                    <div className="card-inner" style={{ borderColor: "rgba(192,57,43,0.18)" }}>
-                      <div className="danger" style={{ fontSize: 14 }}>
-                        This offer exceeds the 100 USDC contract limit and cannot be settled.
-                        Contact the seller to split into smaller trades.
+  {(() => {
+                    const total = BigInt(selectedOffer.payload.usdcAmount) + BigInt(selectedOffer.payload.executorFeeAmount ?? 0);
+                    const offerConfs = Number(selectedOffer.payload.minConfirmations ?? 1);
+                    const confCaps: Record<number, bigint> = { 1: 100_000_000n, 2: 500_000_000n, 3: 2_000_000_000n, 4: 5_000_000_000n, 5: 10_000_000_000n, 6: 25_000_000_000n };
+                    const cap = confCaps[offerConfs] ?? 25_000_000_000n;
+                    if (total > cap) return (
+                      <div className="card-inner" style={{ borderColor: "rgba(192,57,43,0.18)" }}>
+                        <div className="danger" style={{ fontSize: 14 }}>
+                          This offer exceeds the {offerConfs}-confirmation contract cap of {formatUsdc(String(cap))} USDC and cannot be settled.
+                        </div>
                       </div>
-                    </div>
-                  ) : (
-                    <button
-                      className="btn"
-                      onClick={authorizeBuy}
-                      disabled={!isConnected || !!loading || !csdReceiveAddr}
-                    >
-                      {loading ?? "Authorize buy"}
-                    </button>
-                  )}
+                    );
+                    if (usdcAllowance < total) return (
+                      <button className="btn" onClick={approveUsdc} disabled={!isConnected || !!loading}>
+                        {loading ?? "Approve USDC"}
+                      </button>
+                    );
+                    return (
+                      <button className="btn" onClick={authorizeBuy} disabled={!isConnected || !!loading || !csdReceiveAddr}>
+                        {loading ?? "Authorize buy"}
+                      </button>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -1032,7 +1036,8 @@ export default function Home() {
                   <div className="card-inner" style={{ borderColor: "rgba(154,104,0,0.10)" }}>
                     <div className="faint">Trade limit</div>
                     <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-                      Maximum 100 USDC per trade, enforced by the settlement contract.
+                      100 USDC at 1-conf, 500 USDC at 2-conf, 2,000 USDC at 3-conf,
+                      up to 25,000 USDC at 6-conf. Confirmation depth is auto-selected.
                     </div>
                   </div>
                   <div>

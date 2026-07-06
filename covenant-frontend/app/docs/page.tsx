@@ -2,11 +2,11 @@ import Link from "next/link";
 
 export default function Docs() {
   return (
-    <main style={{ maxWidth: 720, margin: "0 auto", padding: "56px 24px 80px" }}>
+    <main style={{ maxWidth: 760, margin: "0 auto", padding: "40px 20px 64px" }}>
 
       <div style={{ marginBottom: 48 }}>
         <div className="label" style={{ marginBottom: 10 }}>Protocol Docs</div>
-        <h1 style={{ fontFamily: "var(--serif)", fontWeight: "normal", fontSize: 36, lineHeight: 1.15 }}>
+        <h1 style={{ fontWeight: "normal", fontSize: 36, lineHeight: 1.15 }}>
           Covenant Documentation
         </h1>
         <p className="muted" style={{ marginTop: 14, fontSize: 16 }}>
@@ -16,8 +16,8 @@ export default function Docs() {
 
       <div className="card col" style={{ gap: 0 }}>
 
-        <section style={{ padding: "24px 0", borderBottom: "1px solid var(--border)" }}>
-          <h2 style={{ fontSize: 18, marginBottom: 12 }}>Core Rule</h2>
+        <section style={{ padding: "24px 0", borderBottom: "1px solid #ddd" }}>
+          <h2 style={{ fontSize: 20, marginBottom: 10, marginTop: 0 }}>Core Rule</h2>
           <p className="muted" style={{ lineHeight: 1.8, marginBottom: 10 }}>
             Execution is valid only when current authorization exists.
           </p>
@@ -28,8 +28,8 @@ export default function Docs() {
           </p>
         </section>
 
-        <section style={{ padding: "24px 0", borderBottom: "1px solid var(--border)" }}>
-          <h2 style={{ fontSize: 18, marginBottom: 16 }}>Roles</h2>
+        <section style={{ padding: "24px 0", borderBottom: "1px solid #ddd" }}>
+          <h2 style={{ fontSize: 20, marginBottom: 12, marginTop: 0 }}>Roles</h2>
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontWeight: 600, marginBottom: 5 }}>User</div>
             <p className="muted" style={{ lineHeight: 1.8 }}>
@@ -68,8 +68,8 @@ export default function Docs() {
           </div>
         </section>
 
-        <section style={{ padding: "24px 0", borderBottom: "1px solid var(--border)" }}>
-          <h2 style={{ fontSize: 18, marginBottom: 12 }}>What runs underneath</h2>
+        <section style={{ padding: "24px 0", borderBottom: "1px solid #ddd" }}>
+          <h2 style={{ fontSize: 20, marginBottom: 10, marginTop: 0 }}>What runs underneath</h2>
           <p className="muted" style={{ lineHeight: 1.8, marginBottom: 10 }}>
             Covenant has no backend. All state (sell offers, buyer authorizations,
             payment proofs, receipts) lives on{" "}
@@ -89,8 +89,8 @@ export default function Docs() {
           </p>
         </section>
 
-        <section style={{ padding: "24px 0", borderBottom: "1px solid var(--border)" }}>
-          <h2 style={{ fontSize: 18, marginBottom: 12 }}>CSD / USDC Flow</h2>
+        <section style={{ padding: "24px 0", borderBottom: "1px solid #ddd" }}>
+          <h2 style={{ fontSize: 20, marginBottom: 10, marginTop: 0 }}>CSD / USDC Flow</h2>
           <ol style={{ paddingLeft: 20, color: "var(--muted)", lineHeight: 2 }}>
             <li>Seller creates a CSD sell offer on the AON network.</li>
             <li>Buyer selects the offer and enters their CSD receive address.</li>
@@ -103,8 +103,8 @@ export default function Docs() {
           </ol>
         </section>
 
-        <section style={{ padding: "24px 0", borderBottom: "1px solid var(--border)" }}>
-          <h2 style={{ fontSize: 18, marginBottom: 12 }}>Revocation</h2>
+        <section style={{ padding: "24px 0", borderBottom: "1px solid #ddd" }}>
+          <h2 style={{ fontSize: 20, marginBottom: 10, marginTop: 0 }}>Revocation</h2>
           <p className="muted" style={{ lineHeight: 1.8, marginBottom: 10 }}>
             Before settlement lock, the buyer can revoke authorization. Revocation
             is an object published to the AON network. Executors check for it before
@@ -113,8 +113,8 @@ export default function Docs() {
           <p className="muted" style={{ lineHeight: 1.8, marginBottom: 10 }}>
             During the lock window, USDC cannot be released to the buyer directly.
             The settlement contract enforces this: while locked, funds can only move
-            via <code>settleCsdUsdc</code> (to the seller, on valid proof) or via
-            <code> refundExpiredLock</code> (back to the buyer, after the window expires).
+            via <code style={{ fontFamily: "var(--mono)", fontSize: 14, background: "#f6f6f6", padding: "0 4px", border: "1px solid #ddd" }}>settleCsdUsdc</code> (to the seller, on valid proof) or via
+            <code style={{ fontFamily: "var(--mono)", fontSize: 14, background: "#f6f6f6", padding: "0 4px", border: "1px solid #ddd" }}> refundExpiredLock</code> (back to the buyer, after the window expires).
           </p>
           <p className="muted" style={{ lineHeight: 1.8 }}>
             If a buyer revokes on AON after USDC is locked, the seller can call the
@@ -125,8 +125,8 @@ export default function Docs() {
           </p>
         </section>
 
-        <section style={{ padding: "24px 0", borderBottom: "1px solid var(--border)" }}>
-          <h2 style={{ fontSize: 18, marginBottom: 12 }}>Security Boundaries</h2>
+        <section style={{ padding: "24px 0", borderBottom: "1px solid #ddd" }}>
+          <h2 style={{ fontSize: 20, marginBottom: 10, marginTop: 0 }}>Security Boundaries</h2>
           <ul style={{ paddingLeft: 20, color: "var(--muted)", lineHeight: 2 }}>
             <li>No asset deposit into Covenant.</li>
             <li>No internal user balances.</li>
@@ -140,7 +140,7 @@ export default function Docs() {
         </section>
 
         <section style={{ padding: "24px 0" }}>
-          <h2 style={{ fontSize: 18, marginBottom: 12 }}>Launch Status</h2>
+          <h2 style={{ fontSize: 20, marginBottom: 10, marginTop: 0 }}>Launch Status</h2>
           <p className="muted" style={{ lineHeight: 1.8 }}>
             Covenant is experimental software. The 100 USDC per trade limit reflects
             1-confirmation settlement on an early-stage proof-of-work chain. Settlement

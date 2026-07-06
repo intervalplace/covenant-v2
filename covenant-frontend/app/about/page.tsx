@@ -8,7 +8,7 @@ export default function About() {
 
       <div style={{ marginBottom: 56 }}>
         <div className="faint">Covenant</div>
-        <h1 style={{ fontSize: 38, lineHeight: 1.1, margin: "12px 0 0", fontFamily: "var(--serif)", fontWeight: "normal" }}>
+        <h1 style={{ fontSize: 38, lineHeight: 1.1, margin: "12px 0 0", fontWeight: "normal" }}>
           Execution no longer requires trust.
         </h1>
         <p className="muted" style={{ marginTop: 16, fontSize: 17, lineHeight: 1.7 }}>
@@ -58,9 +58,9 @@ export default function About() {
               <div key={i} style={{ display: "flex", gap: 16 }}>
                 <div style={{
                   width: 26, height: 26, borderRadius: "50%", flexShrink: 0,
-                  background: "var(--surface2)", border: "1px solid var(--border2)",
+                  background: "#f6f6f6", border: "1px solid #ddd",
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 12, color: "var(--fg)", fontWeight: 600, marginTop: 1,
+                  fontSize: 14, color: "var(--fg)", fontWeight: 600, marginTop: 1,
                 }}>
                   {i + 1}
                 </div>

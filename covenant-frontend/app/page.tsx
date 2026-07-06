@@ -745,7 +745,7 @@ export default function Home() {
                     <div className="mono faint" style={{ marginTop: 8 }}>
                       {shortHash(offer.objectHash)} ·{" "}
                       <a
-                        href={`https://explorer.aon.network`}
+                        href={`https://explorer.aon.network?hash=${offer.objectHash}`}
                         target="_blank" rel="noreferrer"
                         onClick={e => e.stopPropagation()}
                         style={{ color: "inherit" }}
@@ -794,7 +794,7 @@ export default function Home() {
                 <div className="col">
                   <div className="card-inner">
                     <div className="faint">Your authorization</div>
-                    <div className="mono" style={{ marginTop: 8, fontSize: 12 }}>{myBuyerAuth.objectHash}</div>
+                    <a href={`https://explorer.aon.network?hash=${myBuyerAuth.objectHash}`} target="_blank" rel="noreferrer" className="mono" style={{ marginTop: 8, fontSize: 12, display: "block" }}>{myBuyerAuth.objectHash}</a>
                     {buyerCsdAddr && (
                       <>
                         <div className="muted" style={{ marginTop: 12, fontSize: 13 }}>
@@ -1295,7 +1295,7 @@ export default function Home() {
                           {shortHash(t.executionTx, 4)} ↗
                         </a>
                       ) : (
-                        <a href={`https://explorer.aon.network`} target="_blank" rel="noreferrer"
+                        <a href={`https://explorer.aon.network?hash=${t.receiptHash}`} target="_blank" rel="noreferrer"
                           style={{ color: "var(--muted)", fontSize: 12 }}>
                           AON ↗
                         </a>

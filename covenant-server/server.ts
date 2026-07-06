@@ -70,10 +70,35 @@ app.get("/v1/csd/proof/mock/:txid", async (req) => {
   const blockHash = "0x" + blockHashBuf.toString("hex");
   const txidHex   = "0x" + txidBuf.toString("hex");
 
+  // Build confirmation chain: mine N-1 additional blocks after the settlement block.
+  // minConfirmations=1 → empty confirmationChain (settlement block counts as 1)
+  // minConfirmations=2 → one extra block
+  // minConfirmations=3 → two extra blocks
+  const minConf = Number((req.query as any).confirmations ?? "1");
+  const confirmationChain = [];
+  let prevConfBuf = blockHashBuf;
+
+  for (let i = 1; i < minConf; i++) {
+    const confTime = blockTime + i * 120; // 120s block time
+    for (let nonce2 = 0; nonce2 < 1_000_000; nonce2++) {
+      const h2  = Buffer.concat([u32le(1), prevConfBuf, sha256(prevConfBuf), u64le(BigInt(confTime)), u32le(TEST_BITS), u32le(nonce2)]);
+      const bh2 = dsha(h2);
+      if (BigInt("0x" + bh2.toString("hex")) <= TEST_TARGET) {
+        confirmationChain.push({
+          version: 1, prev: "0x" + prevConfBuf.toString("hex"),
+          merkle: "0x" + sha256(prevConfBuf).toString("hex"),
+          time: confTime, bits: TEST_BITS, nonce: nonce2,
+        });
+        prevConfBuf = bh2;
+        break;
+      }
+    }
+  }
+
   return {
     ok: true,
     proof: {
-      ok: true, confirmations: 1,
+      ok: true, confirmations: minConf,
       txid: txidHex, block_hash: blockHash, height: 1000,
       genesis_hash: "0x00000052c2821f71b19c3d79dfabfb12d4076ba15d83b47d008e582aad6c0d52",
       tx_raw: "0x" + rawTxBuf.toString("hex"),
@@ -83,6 +108,7 @@ app.get("/v1/csd/proof/mock/:txid", async (req) => {
       },
       header: { version: 1, prev: "0x" + cleanPrev, merkle: txidHex, time: blockTime, bits: TEST_BITS, nonce: validNonce },
       merkle_branch: [],
+      confirmation_chain: confirmationChain,
     },
   };
 });

@@ -162,7 +162,7 @@ export async function fetchCompletedTrades(): Promise<import("./types").Complete
 
 
 
-export async function fetchCsdProof(txid: string): Promise<any> {
+export async function fetchCsdProof(txid: string, confirmations = 1): Promise<any> {
   const res = await fetch(`${COVENANT_SERVER}/v1/csd/proof/${txid}`);
   const data = await res.json();
   if (!data.ok) throw new Error(data.error ?? "CSD_PROOF_FETCH_FAILED");

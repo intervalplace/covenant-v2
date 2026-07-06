@@ -11,7 +11,7 @@ export default function About() {
       <p className="muted">
         Covenant is a CSD/USDC market with no backend, no database, and no company
         server holding your state. Settlement is enforced by smart contracts.
-        There is nothing in the middle.
+        There is no trusted intermediary.
       </p>
 
       <hr style={{ margin: "34px 0", border: "none", borderTop: "1px solid #ddd" }} />

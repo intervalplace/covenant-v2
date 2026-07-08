@@ -26,13 +26,9 @@ import type { SellOffer, BuyerAuth, TradeMode, Log, CompletedTrade } from "@/typ
 import { finalizeObject as finalizeObj } from "@intervalplace/aon-sdk";
 
 // ── Confirmation tier helper ──────────────────────────────────────────────────
-function requiredConfirmations(usdcUnits: bigint): number {
-  if (usdcUnits > 10_000_000_000n) return 6; // >10,000 USDC → 6-conf (up to 25,000 USDC)
-  if (usdcUnits > 5_000_000_000n)  return 5; // >5,000 USDC  → 5-conf (up to 10,000 USDC)
-  if (usdcUnits > 2_000_000_000n)  return 4; // >2,000 USDC  → 4-conf (up to 5,000 USDC)
-  if (usdcUnits > 500_000_000n)    return 3; // >500 USDC    → 3-conf (up to 2,000 USDC)
-  if (usdcUnits > 100_000_000n)    return 2; // >100 USDC    → 2-conf (up to 500 USDC)
-  return 1;                                   // ≤100 USDC    → 1-conf
+// All trades require 3 confirmations. Single tier, single cap.
+function requiredConfirmations(_usdcUnits: bigint): number {
+  return 3;
 }
 
 // Human-readable description of confirmation requirements
@@ -258,12 +254,8 @@ export default function Home() {
     const csdSats = toCsdSatoshis(csdAmountHuman);
     const usdcUnits = toUsdcUnits((Number(csdAmountHuman) * Number(usdcPerCsd)).toFixed(6));
     const execFeeUnits = toUsdcUnits(executorFeeUsdc || "0");
-    // Tiered cap: check against the contract limit for the auto-selected confirmation tier
-    const confs = requiredConfirmations(usdcUnits);
-    const capsUsdc: Record<number, bigint> = { 1: 100_000_000n, 2: 500_000_000n, 3: 2_000_000_000n, 4: 5_000_000_000n, 5: 10_000_000_000n, 6: 25_000_000_000n };
-    const maxUsdc = capsUsdc[confs] ?? 25_000_000_000n;
-    if (usdcUnits > maxUsdc) {
-      setStatus(`${confs}-confirmation trades are capped at ${formatUsdc(String(maxUsdc))} USDC by the settlement contract.`);
+    if (usdcUnits > 30_000_000n) {
+      setStatus("Maximum trade size is 30 USDC. This limit is set by the settlement contract.");
       return;
     }
     const validBefore = Math.floor(Date.now() / 1000) + 86400; // 24h
@@ -770,9 +762,7 @@ export default function Home() {
                           {Number(offer.payload.executorFeeAmount ?? 0) > 0 && (
                             <span> · +{formatUsdc(offer.payload.executorFeeAmount)} executor fee</span>
                           )}
-                          {Number(offer.payload.minConfirmations ?? 1) > 1 && (
-                            <span> · {offer.payload.minConfirmations}-conf</span>
-                          )}
+
                         </div>
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
@@ -931,9 +921,8 @@ export default function Home() {
                   <div className="card-inner" style={{ borderColor: "rgba(154,104,0,0.10)" }}>
                     <div className="faint">Trade limit</div>
                     <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-                      Trade size limits scale with confirmation depth: 100 USDC (1-conf),
-                      500 USDC (2-conf), 2,000 USDC (3-conf), up to 25,000 USDC (6-conf).
-                      Enforced by the settlement contract.
+                      Maximum 30 USDC per trade, enforced by the settlement contract.
+                      3 confirmations (~6 min) required for all trades.
                     </div>
                   </div>
                   <div>
@@ -1036,8 +1025,8 @@ export default function Home() {
                   <div className="card-inner" style={{ borderColor: "rgba(154,104,0,0.10)" }}>
                     <div className="faint">Trade limit</div>
                     <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-                      100 USDC at 1-conf, 500 USDC at 2-conf, 2,000 USDC at 3-conf,
-                      up to 25,000 USDC at 6-conf. Confirmation depth is auto-selected.
+                      Maximum 30 USDC per trade. 3 confirmations required (~6 min).
+                      Limits are grounded in network security and will increase as hashrate grows.
                     </div>
                   </div>
                   <div>
@@ -1085,16 +1074,10 @@ export default function Home() {
                         <span className="muted">{Number(executorFeeUsdc).toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC</span>
                       </div>
                     )}
-                    {(() => {
-                      const usdcUnits = toUsdcUnits((Number(csdAmountHuman) * Number(usdcPerCsd)).toFixed(6));
-                      const confs = requiredConfirmations(usdcUnits);
-                      return confs > 1 ? (
-                        <div className="row-between" style={{ fontSize: 13, marginTop: 2 }}>
-                          <span className="muted">Confirmations required</span>
-                          <span className="muted">{confDescription(confs)}</span>
-                        </div>
-                      ) : null;
-                    })()}
+                    <div className="row-between" style={{ fontSize: 13, marginTop: 2 }}>
+                      <span className="muted">Confirmations required</span>
+                      <span className="muted">3 blocks (~6 min)</span>
+                    </div>
                   </div>
                   <button
                     className="btn"

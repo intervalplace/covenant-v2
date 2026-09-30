@@ -11,9 +11,10 @@ export default function About() {
         Execution no longer requires trust.
       </h1>
       <p className="muted">
-        Covenant is a spot exchange for ETH, LINK and QNT against USDT on Ethereum,
-        with no backend, no database and no custody. It works like the order book
-        you know from any exchange. The difference is who holds what.
+        Covenant is an order book for trading ETH, LINK and QNT against USDT on
+        Ethereum, with no backend, no database and no custody. It works like the
+        order book you know from any exchange. The difference is that there is
+        no exchange.
       </p>
 
       {hr}
@@ -29,8 +30,8 @@ export default function About() {
       <p className="muted" style={{ marginTop: 16 }}>
         When two signed orders cross, a settlement contract on Ethereum checks both
         signatures and swaps the tokens directly between the two wallets in a single
-        transaction. Either both sides move or neither does. No one, including
-        Covenant, can move your tokens on terms you didn't sign.
+        transaction. Either both sides move or neither does. Your tokens can only
+        ever move on terms you signed.
       </p>
 
       {hr}
@@ -63,6 +64,21 @@ export default function About() {
         only when it has a valid signed order from you.
       </p>
 
+      <h3 style={{ marginTop: 24 }}>No operator</h3>
+      <p className="muted">
+        There is no company or server in the middle: nothing that holds your
+        funds, approves your trades or can freeze an account. Orders live on AON,
+        matching happens in your browser, and settlement is a public contract
+        anyone can call. The contract has no owner and no admin functions, so
+        nobody can pause it, upgrade it or redirect it.
+      </p>
+      <p className="muted" style={{ marginTop: 12 }}>
+        This website is just one way in. It can't move your tokens. What any
+        interface could do is show you a bad order to sign, which is why the
+        order form spells out your terms in plain words before you sign, and your
+        wallet shows the exact values before you approve.
+      </p>
+
       <h3 style={{ marginTop: 24 }}>Partial fills, enforced on-chain</h3>
       <p className="muted">
         The contract keeps a running total of how much of each order has filled
@@ -87,8 +103,8 @@ export default function About() {
         Every order, fill, cancellation and settlement receipt is a signed,
         content-addressed object on AON, propagated across every connected node.
         Settlement is permissionless: anyone can run an executor and settle matched
-        fills. If Covenant disappeared tomorrow, every order would still exist on
-        the network and could still be settled against the contract.
+        fills. If this website disappeared tomorrow, every order would still exist
+        on the network and could still be settled against the contract.
       </p>
 
       {hr}

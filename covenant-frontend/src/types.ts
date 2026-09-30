@@ -1,85 +1,89 @@
 import type { Address, Hex } from "viem";
+import type { Market } from "./config";
 
-// ── AON object shapes ─────────────────────────────────────────────────────────
-
-export type SellOffer = {
-  objectHash:   string;
-  payload: {
-    seller:              Address;
-    sellerUsdcRecipient: Address;
-    csdGenesisHash:      Hex;
-    csdAmount:           string;
-    usdcAmount:          string;
-    pricePerCsd:         string | null;
-    executorFeeAmount:   string;
-    minConfirmations:    string;
-    validBefore:         number;
-  };
-  createdAt: number;
+export type AonObject = {
+  objectHash:    string;
+  objectType:    string;
+  schemaVersion: string;
+  namespace:     string;
+  createdAt:     number;
+  references:    string[];
+  payload:       any;
+  signature?:    any;
 };
 
-export type BuyerAuth = {
-  objectHash: string;
-  payload: {
-    authorization: {
-      buyer:               Address;
-      sellerUsdcRecipient: Address;
-      sellerCsdScriptHash: Hex;
-      csdGenesisHash:      Hex;
-      tradeIntentHash:     Hex;   // objectHash of the sell offer
-      csdAmount:           string;
-      usdc:                Address;
-      usdcAmount:          string;
-      minConfirmations:    string;
-      executorFeeAmount:   string;
-      validAfter:          string;
-      validBefore:         string;
-      nonce:               Hex;
-    };
-  };
-  signature: {
-    signature: Hex;
-    signer:    Address;
-    domain:    any;
-    types:     any;
-    primaryType: string;
-    message:   any;
-  };
-  createdAt: number;
+// Wire shapes (strings for uints, as stored in AON objects)
+export type AuthMessage = {
+  grantor:             Address;
+  settlementContract:  Address;
+  baseToken:           Address;
+  quoteToken:          Address;
+  marketId:            Hex;
+  sideMask:            number;
+  maxBaseExposure:     string;
+  maxQuoteExposure:    string;
+  maxExecutorFeeQuote: string;
+  minPrice:            string;
+  maxPrice:            string;
+  validAfter:          string;
+  validBefore:         string;
+  authNonce:           Hex;
 };
 
-export type AonReceipt = {
-  objectHash: string;
-  payload: {
-    executionTx: string;
-    verification?: { ok: boolean };
-  };
-  references: string[];
-  createdAt: number;
+export type OrderMessage = {
+  trader:          Address;
+  marketId:        Hex;
+  side:            number;
+  price:           string;
+  baseAmount:      string;
+  orderNonce:      Hex;
+  sessionAuthHash: Hex;
+  validAfter:      string;
+  validBefore:     string;
+  receiveNative:   boolean;  // buy orders on WETH markets: paid out as native ETH
 };
 
-// ── Local UI state shapes ─────────────────────────────────────────────────────
+export type Side = "buy" | "sell";
 
-export type TradeMode = "buy" | "sell";
-
-export type SettlementStatus =
-  | "none"
-  | "auth_pending"    // buyer auth created, waiting for seller to lock
-  | "locked"          // USDC locked on-chain
-  | "proof_submitted" // proof object on AON, executor settling
-  | "settled";        // receipt on AON
-
-export type CompletedTrade = {
-  receiptHash:        string;
-  authHash:           string;
-  csdAmount:          string;   // satoshis
-  usdcAmount:         string;   // 6-decimal USDC units
-  pricePerCsd:        number;   // USDC per CSD, human-readable
-  buyer:              Address;
-  sellerUsdcRecipient: Address;
-  executionTx:        string;
-  timestamp:          number;   // ms
+// A signed order on AON (may be open, filled, cancelled or expired)
+export type RestingOrder = {
+  market:       Market;
+  side:         Side;          // maker's side
+  maker:        Address;
+  price:        bigint;        // contract price (quote units per 1e18 base units)
+  baseAmount:   bigint;
+  filled:       bigint;        // settled on-chain
+  pending:      bigint;        // in fills awaiting settlement
+  remaining:    bigint;        // still open
+  validBefore:  number;        // unix seconds
+  createdAt:    number;        // ms
+  cancelled:    boolean;
+  expired:      boolean;
+  feeBudgetLeft: bigint;       // buy orders: executor fee budget left
+  funded:       boolean;       // maker's wallet currently covers it
+  authObj:      AonObject;
+  orderObj:     AonObject;
+  orderEip712:  Hex;
 };
 
+export type FillStatus = "pending" | "settled" | "stale";
+
+export type FillView = {
+  fillHash:     string;
+  market:       Market;
+  takerSide:    Side;
+  maker:        Address;
+  taker:        Address;
+  makerOrderHash: string;
+  takerOrderHash: string;
+  fillNonce:    Hex;
+  price:        bigint;
+  baseAmount:   bigint;
+  quoteAmount:  bigint;
+  status:       FillStatus;
+  executionTx?: string;
+  createdAt:    number;
+  settledAt?:   number;
+};
 
 export type Log = { ts: number; text: string };

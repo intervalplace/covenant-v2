@@ -1,64 +1,43 @@
 "use client";
 
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
-import { useEffect, useRef, useState, useCallback } from "react";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
-  useAccount, useConnect, useDisconnect,
-  useReadContract, useReadContracts, useWriteContract, usePublicClient,
-  useSignTypedData,
+  useAccount, useConnect, useDisconnect, useBalance,
+  useReadContracts, useWriteContract, usePublicClient, useSignTypedData,
 } from "wagmi";
-import { injected } from "wagmi/connectors";
-import { parseAbi, maxUint256, hashTypedData, type Address, type Hex } from "viem";
+import { injected } from "@wagmi/core";
+import { maxUint256, formatUnits, type Address, type Hex } from "viem";
 import {
-  AON_NODE_URL, SETTLEMENT_CONTRACT, USDC_ADDRESS,
-  CSD_GENESIS_HASH, getCsdUsdcDomain, CSD_USDC_TYPES, CHAIN_ID, DEMO_MODE,
+  MARKETS, SETTLEMENT_CONTRACT, CHAIN_ID, DEMO_MODE, TOKENS,
+  EXECUTOR_FEE_QUOTE, MAX_FILLS_PER_ORDER, MAX_ORDER_QUOTE,
+  MAKER_ORDER_TTL_SECS, MARKET_ORDER_TTL_SECS, NATIVE_GAS_RESERVE,
+  AUTH_TYPES, ORDER_TYPES, REVOCATION_TYPES, getEvmSpotDomain,
+  SIDE_BUY_BASE, SIDE_SELL_BASE, type Market, type Token,
 } from "@/config";
 import {
-  aonPutObject, fetchSellOffers, fetchBuyerAuthForOffer, fetchMyBuyerAuth,
-  fetchReceipt, fetchCsdProof, fetchCsdBalance, fetchCompletedTrades, isAuthorizationRevoked,
-  randomHex32, csdAddrToBytes32,
-  shortHash, formatCsd, formatUsdc, secondsLeft, formatCountdown,
+  aonPutObject, fetchNamespaceObjects, deriveState, isLive, commitmentsByMakerToken, matchOrder, applyFunding,
+  buildAuthMessage, buildOrderMessage, authForSigning, orderForSigning,
+  authObject, orderObject, fillObject, revocationMessage, revocationObject,
+  toBaseUnits, toPrice, quoteFor, fmtBase, fmtQuote, fmtPrice, fmt, priceNumber, priceToInput,
+  shortHash, shortAddr, formatCountdown,
 } from "@/aon";
-import { erc20Abi, csdUsdcSettlementAbi } from "@/abi";
-import type { SellOffer, BuyerAuth, TradeMode, Log, CompletedTrade } from "@/types";
+import { erc20Abi, wethAbi, evmSpotSettlementAbi } from "@/abi";
+import type { AonObject, RestingOrder, FillView, Log, Side } from "@/types";
+import { finalizeObject } from "@intervalplace/aon-sdk";
+import { Arc } from "@/arc";
 
-// Direct import — finalizeObject is pure JS, safe for both SSR and browser
-import { finalizeObject as finalizeObj } from "@intervalplace/aon-sdk";
+const finalize = (o: any) => finalizeObject(o as any) as any as AonObject;
+const EXPLORER = "https://explorer.aon.network";
+const etherscanTx = (tx: string) => (CHAIN_ID === 1 ? `https://etherscan.io/tx/${tx}` : `${EXPLORER}`);
+const BOOK_DEPTH = 10;
 
-// ── Confirmation tier helper ──────────────────────────────────────────────────
-// All trades require 3 confirmations. Single tier, single cap.
-function requiredConfirmations(_usdcUnits: bigint): number {
-  return 3;
+function tryParse<T>(fn: () => T): T | null {
+  try { return fn(); } catch { return null; }
 }
+const minBig = (a: bigint, b: bigint) => (a < b ? a : b);
 
-// Human-readable description of confirmation requirements
-function confDescription(confs: number): string {
-  const mins = confs * 2; // 120s block time
-  return confs === 1 ? "~2 min" : `${confs} blocks (~${mins} min)`;
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function short(x?: string) { return x ? `${x.slice(0, 6)}…${x.slice(-4)}` : ""; }
-
-function toUsdcUnits(x: string) {
-  const [whole, frac = ""] = x.trim().split(".");
-  return BigInt(whole || "0") * 1_000_000n + BigInt((frac + "000000").slice(0, 6));
-}
-
-function toCsdSatoshis(x: string) {
-  const [whole, frac = ""] = x.trim().split(".");
-  return BigInt(whole || "0") * 100_000_000n + BigInt((frac + "00000000").slice(0, 8));
-}
-
-function pricePerCsd(csdAmount: string, usdcAmount: string): string {
-  try {
-    const csd  = Number(csdAmount) / 1e8;
-    const usdc = Number(usdcAmount) / 1e6;
-    return (usdc / csd).toLocaleString(undefined, { maximumFractionDigits: 6 });
-  } catch { return "0"; }
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
+type Level = { price: bigint; size: bigint; total: bigint; cum: bigint; mine: boolean };
 
 export default function Home() {
   const [mounted, setMounted] = useState(false);
@@ -67,1345 +46,835 @@ export default function Home() {
   const { address, isConnected, chainId } = useAccount();
   const { connect }    = useConnect();
   const { disconnect } = useDisconnect();
-  const { signTypedDataAsync }   = useSignTypedData();
-  const { writeContractAsync }   = useWriteContract();
-  const publicClient             = usePublicClient();
+  const { signTypedDataAsync } = useSignTypedData();
+  const { writeContractAsync } = useWriteContract();
+  const publicClient = usePublicClient();
 
   // ── UI state ────────────────────────────────────────────────────────────────
-  const [mode, setMode]           = useState<TradeMode>("buy");
-  const [logs, setLogs]           = useState<Log[]>([]);
-  const [status, setStatus]       = useState("");
-  const [loading, setLoading]     = useState<string | null>(null);
+  const [marketKey, setMarketKey] = useState(MARKETS[0].key);
+  const market = MARKETS.find(m => m.key === marketKey) ?? MARKETS[0];
 
-  // Sell form
-  const [csdAmountHuman, setCsdAmountHuman] = useState("5");
-  const [usdcPerCsd,     setUsdcPerCsd]     = useState("1");
-  const [usdcRecipient,  setUsdcRecipient]  = useState("");
-  const [executorFeeUsdc, setExecutorFeeUsdc] = useState("0");
+  const [logs, setLogs]       = useState<Log[]>([]);
+  const [status, setStatus]   = useState("");
+  const [loading, setLoading] = useState<string | null>(null);
+  const addLog = (text: string) => setLogs(l => [{ ts: Date.now(), text }, ...l].slice(0, 40));
 
-  // My sell offer on AON
-  const [mySellOffer, setMySellOffer] = useState<SellOffer | null>(null);
-  // Buyer auth matching my offer
-  const [matchedAuth, setMatchedAuth]   = useState<BuyerAuth | null>(null);
-  const [matchedReserveHash, setMatchedReserveHash] = useState<string | null>(null);
+  const [side, setSide]           = useState<Side>("buy");
+  const [orderType, setOrderType] = useState<"limit" | "market">("limit");
+  const [priceHuman,  setPriceHuman]  = useState("");
+  const [amountHuman, setAmountHuman] = useState("");
+  const [activityTab, setActivityTab] = useState<"open" | "trades">("open");
 
-  // Buy form
-  const [selectedOffer, setSelectedOffer] = useState<SellOffer | null>(null);
-  const [csdReceiveAddr, setCsdReceiveAddr] = useState(""); // 20-byte hex CSD address
+  // Active traders can keep WETH to avoid re-wrapping on every sell
+  const [preferWeth, setPreferWeth] = useState(false);
+  useEffect(() => { try { setPreferWeth(localStorage.getItem("covenant.receive.weth") === "1"); } catch {} }, []);
+  const togglePreferWeth = (v: boolean) => { setPreferWeth(v); try { localStorage.setItem("covenant.receive.weth", v ? "1" : "0"); } catch {} };
 
-  // My buyer auth on AON
-  const [myBuyerAuth, setMyBuyerAuth] = useState<BuyerAuth | null>(null);
-  // Settlement state
-  const [settlementStatus, setSettlementStatus] = useState<"none"|"auth_active"|"locked"|"settled">("none");
-  const [lockedAmount,  setLockedAmount]  = useState<bigint>(0n);
-  const [lockedUntilTs, setLockedUntilTs] = useState<number>(0);
-  const [settledTx,     setSettledTx]     = useState<string>("");
+  // First-visit guide
+  const [guideOpen, setGuideOpen] = useState(false);
+  useEffect(() => {
+    try { setGuideOpen(localStorage.getItem("covenant.guide.hidden") !== "1"); } catch { setGuideOpen(true); }
+  }, []);
+  const hideGuide = () => { setGuideOpen(false); try { localStorage.setItem("covenant.guide.hidden", "1"); } catch {} };
 
-  // Market data
-  const [sellBook,       setSellBook]       = useState<SellOffer[]>([]);
-  const [completedTrades, setCompletedTrades] = useState<CompletedTrade[]>([]);
-
-  // Seller proof submission
-  const [csdTxid, setCsdTxid] = useState("");
-  const [revocationDetected, setRevocationDetected] = useState(false);
-  const [confirmationCount, setConfirmationCount] = useState(0);
-  const [checkingConfs, setCheckingConfs] = useState(false);
-  const pollingRef = useRef<boolean>(false);
-
-  // Balances
-  const [csdBalance, setCsdBalance] = useState<bigint>(0n);
+  const [orders, setOrders] = useState<RestingOrder[]>([]);
+  const [fills,  setFills]  = useState<FillView[]>([]);
   const [nodeUnreachable, setNodeUnreachable] = useState(false);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
-  const [nowSecs,    setNowSecs]    = useState(Math.floor(Date.now() / 1000));
+  const [nowSecs, setNowSecs] = useState(Math.floor(Date.now() / 1000));
 
-  const addLog = (text: string) =>
-    setLogs(l => [{ ts: Date.now(), text }, ...l].slice(0, 40));
-
-  // Tick every second for countdowns
   useEffect(() => {
     const id = setInterval(() => setNowSecs(Math.floor(Date.now() / 1000)), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // Set USDC recipient to connected address by default
-  useEffect(() => {
-    if (address && !usdcRecipient) setUsdcRecipient(address);
-  }, [address]);
+  useEffect(() => { setPriceHuman(""); setAmountHuman(""); setStatus(""); }, [marketKey]);
 
-  // ── On-chain reads ──────────────────────────────────────────────────────────
-
-  const { data: balanceData } = useReadContracts({
-    contracts: address && USDC_ADDRESS && !DEMO_MODE ? [
-      { address: USDC_ADDRESS, abi: erc20Abi, functionName: "balanceOf",  args: [address] },
-      { address: USDC_ADDRESS, abi: erc20Abi, functionName: "allowance",  args: [address, SETTLEMENT_CONTRACT] },
-    ] : [],
-    query: { enabled: !!address && !!USDC_ADDRESS && !DEMO_MODE, refetchInterval: 3000 },
+  // ── Wallet reads for the active market ──────────────────────────────────────
+  const readsEnabled = !!address && !!SETTLEMENT_CONTRACT && !DEMO_MODE;
+  const owner = (address ?? "0x0000000000000000000000000000000000000000") as Address;
+  const { data: reads, refetch: refetchReads } = useReadContracts({
+    contracts: [
+      { address: market.base.address,  abi: erc20Abi, functionName: "balanceOf", args: [owner] },
+      { address: market.base.address,  abi: erc20Abi, functionName: "allowance", args: [owner, SETTLEMENT_CONTRACT] },
+      { address: market.quote.address, abi: erc20Abi, functionName: "balanceOf", args: [owner] },
+      { address: market.quote.address, abi: erc20Abi, functionName: "allowance", args: [owner, SETTLEMENT_CONTRACT] },
+    ],
+    query: { enabled: readsEnabled, refetchInterval: 4000 },
   });
+  const { data: nativeBal, refetch: refetchNative } = useBalance({ address, query: { enabled: !!address && !DEMO_MODE, refetchInterval: 8000 } });
 
-  // Demo mode: show 1000 USDC and pre-approved so users can see the full flow
-  const usdcBalance   = DEMO_MODE ? 1_000_000_000n : ((balanceData?.[0]?.result as bigint) ?? 0n);
-  const usdcAllowance = DEMO_MODE ? 1_000_000_000n : ((balanceData?.[1]?.result as bigint) ?? 0n);
+  // Native ETH payout goes to plain wallets. Addresses with code (smart
+  // accounts, EIP-7702 delegations) might refuse ETH, so they get WETH.
+  const [canReceiveNative, setCanReceiveNative] = useState(true);
+  useEffect(() => {
+    if (!address || !publicClient || DEMO_MODE) { setCanReceiveNative(true); return; }
+    publicClient.getCode({ address }).then(c => setCanReceiveNative(!c || c === "0x")).catch(() => setCanReceiveNative(false));
+  }, [address, publicClient]);
 
-  // ── AON data refresh ─────────────────────────────────────────────────────────
+  const demo = (d: number) => 10_000n * 10n ** BigInt(d);
+  // Demo wallet: plain ETH and no WETH on ETH/USDT, so the wrap step shows up
+  const baseBalance    = !isConnected ? 0n : DEMO_MODE ? (market.base.wrapsNative ? 0n : demo(market.base.decimals)) : (readsEnabled ? (reads?.[0]?.result ?? 0n) : 0n);
+  const baseAllowance  = DEMO_MODE ? maxUint256 : (readsEnabled ? (reads?.[1]?.result ?? 0n) : 0n);
+  const quoteBalance   = !isConnected ? 0n : DEMO_MODE ? demo(market.quote.decimals) : (readsEnabled ? (reads?.[2]?.result ?? 0n) : 0n);
+  const quoteAllowance = DEMO_MODE ? maxUint256 : (readsEnabled ? (reads?.[3]?.result ?? 0n) : 0n);
+  const nativeBalance  = !isConnected ? 0n : DEMO_MODE ? 5n * 10n ** 18n : (nativeBal?.value ?? 0n);
+
+  // ── AON + chain refresh ─────────────────────────────────────────────────────
+  const refreshing = useRef(false);
+  const refreshAgain = useRef(false);
+  const usedNonceCache = useRef(new Set<string>()); // consumed nonces never un-consume
 
   const refresh = useCallback(async () => {
+    if (refreshing.current) { refreshAgain.current = true; return; }
+    refreshing.current = true;
     try {
+      const objects = await fetchNamespaceObjects();
+      let state = await deriveState(objects);
+      const pc = publicClient;
+
+      if (pc && SETTLEMENT_CONTRACT && !DEMO_MODE) {
+        const read = (functionName: "usedFillNonce" | "filledBaseByOrder", arg: Hex) =>
+          pc.readContract({ address: SETTLEMENT_CONTRACT, abi: evmSpotSettlementAbi, functionName, args: [arg] } as any);
+
+        // 1. Which fills has the contract actually settled? (source of truth)
+        const weekAgo = Date.now() - 7 * 86400e3;
+        const unknown = state.fills.filter(f => f.createdAt > weekAgo && !usedNonceCache.current.has(f.fillNonce.toLowerCase()));
+        await Promise.all(unknown.map(async f => {
+          if (await read("usedFillNonce", f.fillNonce).catch(() => false)) usedNonceCache.current.add(f.fillNonce.toLowerCase());
+        }));
+
+        // 2. Per-order fill totals (also catches fills settled outside AON)
+        const candidates = state.orders.filter(o => !o.cancelled && !o.expired);
+        const filled = new Map<string, bigint>();
+        await Promise.all(candidates.map(async o => {
+          const v = await read("filledBaseByOrder", o.orderEip712).catch(() => 0n) as bigint;
+          if (v > 0n) filled.set(o.orderEip712.toLowerCase(), v);
+        }));
+        state = await deriveState(objects, { filled, usedNonces: usedNonceCache.current });
+
+        // 3. Hide liquidity the maker can't currently pay for
+        const live = state.orders.filter(isLive);
+        const keys = [...new Set(live.map(o => `${o.maker.toLowerCase()}:${(o.side === "sell" ? o.market.base : o.market.quote).address.toLowerCase()}`))];
+        const capacity = new Map<string, bigint>();
+        await Promise.all(keys.map(async k => {
+          const [maker, token] = k.split(":") as [Address, Address];
+          const [bal, allow] = await Promise.all([
+            pc.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [maker] }).catch(() => 0n),
+            pc.readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [maker, SETTLEMENT_CONTRACT] }).catch(() => 0n),
+          ]) as [bigint, bigint];
+          capacity.set(k, minBig(bal, allow));
+        }));
+        applyFunding(state.orders, capacity);
+      }
+
+      setOrders(state.orders);
+      setFills(state.fills);
       setNodeUnreachable(false);
-      // Sell book + completed trades
-      const [offers, trades] = await Promise.all([
-        fetchSellOffers(),
-        fetchCompletedTrades(),
-      ]);
-      setCompletedTrades(trades);
-      setSellBook(offers.filter(o => o.payload.seller.toLowerCase() !== address?.toLowerCase()));
-
-      // My sell offer
-      if (address) {
-        const myOffer = offers.find(o =>
-          o.payload.seller.toLowerCase() === address.toLowerCase()
-        ) ?? null;
-        setMySellOffer(myOffer);
-
-        // Buyer auth matching my offer + its reserve (proof must reference reserve)
-        if (myOffer) {
-          const auth = await fetchBuyerAuthForOffer(myOffer.objectHash);
-          setMatchedAuth(auth);
-          if (auth) {
-            // Find the reserve object that references this auth
-            const reserveData = await fetch(
-              `${AON_NODE_URL}/v1/objects?objectType=reserve&namespace=aon:csd-usdc&references=${auth.objectHash}&limit=5`
-            ).then(r => r.json()).catch(() => ({ objects: [] }));
-            const reserve = (reserveData.objects ?? []).find((o: any) =>
-              (o.references ?? []).some((r: string) => r.toLowerCase() === auth.objectHash.toLowerCase())
-            );
-            setMatchedReserveHash(reserve?.objectHash ?? null);
-          }
-        }
-
-        // My buyer auth
-        const buyerAuth = await fetchMyBuyerAuth(address);
-        setMyBuyerAuth(buyerAuth);
-
-        // Settlement state from on-chain + receipt
-        if (buyerAuth && publicClient) {
-          if (DEMO_MODE) {
-            // In demo mode: skip on-chain reads, just track auth presence
-            if (settlementStatus === "none") setSettlementStatus("auth_active");
-          } else if (SETTLEMENT_CONTRACT) {
-            // Contract keys by EIP-712 hash of the auth struct, not AON object hash.
-            // Compute from the stored signature fields inside the auth object.
-            const s = buyerAuth.signature;
-            const authEip712Hash = hashTypedData({
-              domain:      s.domain,
-              types:       s.types,
-              primaryType: s.primaryType,
-              message:     s.message,
-            }) as Hex;
-            const [locked, until, finalized] = await Promise.all([
-              publicClient.readContract({ address: SETTLEMENT_CONTRACT, abi: csdUsdcSettlementAbi, functionName: "lockedAmount",  args: [authEip712Hash] }).catch(() => 0n),
-              publicClient.readContract({ address: SETTLEMENT_CONTRACT, abi: csdUsdcSettlementAbi, functionName: "lockedUntil",   args: [authEip712Hash] }).catch(() => 0n),
-              publicClient.readContract({ address: SETTLEMENT_CONTRACT, abi: csdUsdcSettlementAbi, functionName: "finalizedAuthorization", args: [authEip712Hash] }).catch(() => false),
-            ]) as [bigint, bigint, boolean];
-
-            setLockedAmount(locked);
-            setLockedUntilTs(Number(until));
-
-            if (finalized) {
-              setSettlementStatus("settled");
-              const receipt = await fetchReceipt(buyerAuth.objectHash);
-              if (receipt?.payload?.executionTx) setSettledTx(receipt.payload.executionTx);
-            } else if (locked > 0n) {
-              setSettlementStatus("locked");
-              // Check if buyer revoked on AON — seller must settle directly
-              const revoked = await isAuthorizationRevoked(buyerAuth.objectHash);
-              setRevocationDetected(revoked);
-            } else if (buyerAuth) {
-              setSettlementStatus("auth_active");
-            }
-          }
-        }
-      }
-    } catch (err: any) {
+    } catch (err) {
       console.error("refresh error", err);
-      if (err?.message?.includes("fetch") || err?.message?.includes("network") || err?.message?.includes("ECONNREFUSED")) {
-        setNodeUnreachable(true);
-      }
+      setNodeUnreachable(true);
     } finally {
+      refreshing.current = false;
       setInitialLoadDone(true);
+      if (refreshAgain.current) { refreshAgain.current = false; setTimeout(() => refresh(), 0); }
     }
-  }, [address, publicClient]);
+  }, [publicClient]);
 
   useEffect(() => {
     refresh();
-    const id = setInterval(refresh, 4000);
-    return () => { clearInterval(id); pollingRef.current = false; };
+    const id = setInterval(refresh, 5000);
+    return () => clearInterval(id);
   }, [refresh]);
 
-  // CSD balance
-  useEffect(() => {
-    if (!csdReceiveAddr) return;
-    fetchCsdBalance(csdReceiveAddr).then(setCsdBalance).catch(() => {});
-  }, [csdReceiveAddr]);
+  // ── Derived views ───────────────────────────────────────────────────────────
+  const me = address?.toLowerCase();
+  const B = market.base.symbol;
+  const Q = market.quote.symbol;
 
-  // ── Actions ──────────────────────────────────────────────────────────────────
-
-  async function createSellOffer() {
-    if (!address || !finalizeObj) return;
-    const csdSats = toCsdSatoshis(csdAmountHuman);
-    const usdcUnits = toUsdcUnits((Number(csdAmountHuman) * Number(usdcPerCsd)).toFixed(6));
-    const execFeeUnits = toUsdcUnits(executorFeeUsdc || "0");
-    if (usdcUnits > 30_000_000n) {
-      setStatus("Maximum trade size is 30 USDC. This limit is set by the settlement contract.");
-      return;
+  const bookOrders = orders.filter(o => o.market.key === market.key && isLive(o) && o.funded);
+  const levels = (s: Side): Level[] => {
+    const map = new Map<bigint, Level>();
+    for (const o of bookOrders.filter(o => o.side === s)) {
+      const l = map.get(o.price) ?? { price: o.price, size: 0n, total: 0n, cum: 0n, mine: false };
+      l.size += o.remaining; l.total += quoteFor(o.remaining, o.price);
+      l.mine ||= o.maker.toLowerCase() === me;
+      map.set(o.price, l);
     }
-    const validBefore = Math.floor(Date.now() / 1000) + 86400; // 24h
+    const sorted = [...map.values()].sort((a, b) =>
+      s === "sell" ? (a.price < b.price ? -1 : 1) : (a.price > b.price ? -1 : 1)).slice(0, BOOK_DEPTH);
+    let cum = 0n;
+    for (const l of sorted) { cum += l.size; l.cum = cum; }
+    return sorted;
+  };
+  const asks = levels("sell");
+  const bids = levels("buy");
+  const maxCum = [asks.at(-1)?.cum ?? 0n, bids.at(-1)?.cum ?? 0n].reduce((a, b) => (a > b ? a : b), 1n);
 
-    const obj = finalizeObj({
-      objectType: "csd_sell_offer", schemaVersion: "1", namespace: "aon:csd-usdc",
-      createdAt: Date.now(), references: [],
-      payload: {
-        offerType:           "csd_usdc_sell",
-        seller:              address,
-        sellerUsdcRecipient: usdcRecipient || address,
-        csdGenesisHash:      CSD_GENESIS_HASH,
-        csdAmount:           csdSats.toString(),
-        usdcAmount:          usdcUnits.toString(),
-        pricePerCsd:         usdcPerCsd,
-        executorFeeAmount:   toUsdcUnits(executorFeeUsdc || "0").toString(),
-        validBefore,
-      },
-    } as any);
+  const marketFills = useMemo(() => fills.filter(f => f.market.key === market.key && f.status !== "stale"), [fills, market.key]);
+  const settledTrades = marketFills.filter(f => f.status === "settled");
+  const lastPrice = settledTrades[0]?.price;
 
-    setLoading("Creating sell offer...");
-    try {
-      const res = await aonPutObject(obj);
-      setMySellOffer({ objectHash: res.objectHash, payload: obj.payload as any, createdAt: obj.createdAt });
-      setStatus("Sell offer created. Waiting for a buyer.");
-      addLog(`Sell offer: ${res.objectHash}`);
-    } finally { setLoading(null); }
+  const myOpen = me ? orders.filter(o => o.maker.toLowerCase() === me && !o.cancelled && !o.expired && (o.remaining > 0n || o.pending > 0n)) : [];
+  const myFills = me ? fills.filter(f => f.maker.toLowerCase() === me || f.taker.toLowerCase() === me).slice(0, 25) : [];
+
+  // Tokens already promised to my other open orders
+  const commitments = useMemo(() => commitmentsByMakerToken(orders), [orders]);
+  const committed = (t: Token) => (me ? commitments.get(`${me}:${t.address.toLowerCase()}`) ?? 0n : 0n);
+  const baseAvail  = baseBalance  > committed(market.base)  ? baseBalance  - committed(market.base)  : 0n;
+  const quoteAvail = quoteBalance > committed(market.quote) ? quoteBalance - committed(market.quote) : 0n;
+  // On ETH markets, ETH in the wallet can be wrapped on the way into a sell
+  const isEthMarket = !!market.base.wrapsNative;
+  const wrappable = isEthMarket && nativeBalance > NATIVE_GAS_RESERVE ? nativeBalance - NATIVE_GAS_RESERVE : 0n;
+  const sellAvail = baseAvail + wrappable;
+
+  // ── Order preview ───────────────────────────────────────────────────────────
+  const amount = tryParse(() => toBaseUnits(market, amountHuman));
+  const limit  = orderType === "limit" ? tryParse(() => toPrice(market, priceHuman)) : null;
+  const preview = useMemo(() => {
+    if (!amount || amount === 0n || (orderType === "limit" && !limit)) return null;
+    const m = matchOrder({ book: orders, market, side, amount, limit, me });
+    const orderPrice = orderType === "limit" ? limit! : m.worstPrice;
+    const orderBase  = orderType === "limit" ? amount : m.filled;
+    const fee = side === "buy" ? EXECUTOR_FEE_QUOTE * BigInt(m.legs.length) : 0n;
+    const maxFeeBudget = side === "buy" ? EXECUTOR_FEE_QUOTE * MAX_FILLS_PER_ORDER : 0n;
+    const cost = orderPrice ? quoteFor(orderBase, orderPrice) : 0n; // worst case for a buy
+    const need = side === "buy" ? cost + maxFeeBudget : orderBase;
+    return { ...m, orderPrice, orderBase, fee, maxFeeBudget, cost, need };
+  }, [amount, limit, orderType, side, orders, market, me]);
+
+  const payToken  = side === "buy" ? market.quote : market.base;
+  const payAvail  = side === "buy" ? quoteAvail : sellAvail;
+  // WETH to create from ETH before this sell can be signed
+  const wrapNeeded = side === "sell" && isEthMarket && preview && preview.orderBase > baseAvail ? preview.orderBase - baseAvail : 0n;
+  const receiveNative = side === "buy" && isEthMarket && canReceiveNative && !preferWeth;
+  const payAllow  = side === "buy" ? quoteAllowance : baseAllowance;
+
+  const problem = (() => {
+    if (!preview) return null;
+    if (preview.selfCross) return "This would trade against your own order. Cancel it first or change the price.";
+    if (orderType === "market" && preview.filled === 0n) return `No ${side === "buy" ? "sell" : "buy"} orders to match.`;
+    if (orderType === "market" && preview.filled < (amount ?? 0n)) return `Only ${fmtBase(market, preview.filled)} ${B} available. The order will be reduced.`;
+    if (MAX_ORDER_QUOTE > 0n && preview.orderPrice && quoteFor(preview.orderBase, preview.orderPrice) > MAX_ORDER_QUOTE)
+      return `Orders are limited to ${fmtQuote(market, MAX_ORDER_QUOTE)} ${Q} for now.`;
+    if (isConnected && payAvail < preview.need) return `Not enough ${payToken.symbol}. Available: ${fmt(payAvail, payToken.decimals)}.`;
+    return null;
+  })();
+  const blocking = problem && !problem.startsWith("Only ");
+
+  function setPct(pct: bigint) {
+    if (side === "sell") { setAmountHuman(formatUnits(sellAvail * pct / 100n, market.base.decimals)); return; }
+    const p = orderType === "limit" ? limit : asks[0]?.price;
+    if (!p || p === 0n) return;
+    const spend = quoteAvail * pct / 100n - EXECUTOR_FEE_QUOTE * MAX_FILLS_PER_ORDER;
+    if (spend <= 0n) return;
+    setAmountHuman(formatUnits((spend * 10n ** 18n) / p, market.base.decimals));
   }
 
-  async function approveUsdc() {
-    if (!address) return;
-    if (DEMO_MODE) { setStatus("Demo mode: USDC pre-approved."); return; }
-    setLoading("Approving USDC...");
-    try {
-      setLoading("Approving USDC...");
-      const approveTx = await writeContractAsync({
-        address: USDC_ADDRESS, abi: erc20Abi,
-        functionName: "approve",
-        args: [SETTLEMENT_CONTRACT, maxUint256],
-      });
-      setLoading("Waiting for confirmation...");
-      await publicClient?.waitForTransactionReceipt({ hash: approveTx });
-      addLog("USDC approved.");
-      setStatus("USDC approved. You can now authorize the trade.");
-    } finally { setLoading(null); }
+  function pickLevel(l: Level, levelSide: Side) {
+    setOrderType("limit");
+    setSide(levelSide === "sell" ? "buy" : "sell");
+    setPriceHuman(priceToInput(market, l.price));
+    setAmountHuman(formatUnits(l.cum, market.base.decimals));
   }
 
-  async function authorizeBuy() {
-    if (!address || !selectedOffer || !finalizeObj) return;
-    if (!csdReceiveAddr || !/^0x[0-9a-fA-F]{40}$/.test(csdReceiveAddr.trim())) {
-      setStatus("Enter a valid 20-byte CSD receive address (0x + 40 hex chars).");
-      return;
+  // ── Wallet helpers ──────────────────────────────────────────────────────────
+  function requireReady(): Address | null {
+    if (!address) { setStatus("Connect a wallet to trade."); return null; }
+    if (chainId !== CHAIN_ID) { setStatus("Switch your wallet to Ethereum mainnet."); return null; }
+    if (!SETTLEMENT_CONTRACT) { setStatus("Settlement contract is not configured (NEXT_PUBLIC_EVM_SPOT_SETTLEMENT)."); return null; }
+    return address;
+  }
+
+  async function ensureAllowance(token: Token, needed: bigint) {
+    if (DEMO_MODE || !address || !publicClient || needed === 0n) return;
+    const current = await publicClient.readContract({
+      address: token.address, abi: erc20Abi, functionName: "allowance", args: [address, SETTLEMENT_CONTRACT],
+    }) as bigint;
+    if (current >= needed) return;
+    // USDT rejects changing a nonzero allowance to another nonzero value
+    if (current > 0n && token.address.toLowerCase() === TOKENS.USDT.address.toLowerCase()) {
+      setLoading(`Resetting ${token.symbol} approval...`);
+      const tx0 = await writeContractAsync({ address: token.address, abi: erc20Abi, functionName: "approve", args: [SETTLEMENT_CONTRACT, 0n] });
+      await publicClient.waitForTransactionReceipt({ hash: tx0 });
     }
+    setLoading(`Approve ${token.symbol} in your wallet...`);
+    const tx = await writeContractAsync({ address: token.address, abi: erc20Abi, functionName: "approve", args: [SETTLEMENT_CONTRACT, maxUint256] });
+    setLoading(`Waiting for ${token.symbol} approval...`);
+    await publicClient.waitForTransactionReceipt({ hash: tx });
+    addLog(`${token.symbol} approved for the settlement contract.`);
+    refetchReads();
+  }
 
-    const now          = Math.floor(Date.now() / 1000);
-    const usdcAmount   = BigInt(selectedOffer.payload.usdcAmount);
-    const csdAmount    = BigInt(selectedOffer.payload.csdAmount);
-    const scriptHash32 = csdAddrToBytes32(csdReceiveAddr.trim());
+  function errorText(err: any) {
+    const msg = err?.shortMessage ?? err?.message ?? "Unknown error";
+    if (/reject|denied/i.test(msg)) return "Request cancelled in wallet.";
+    return msg.slice(0, 160);
+  }
 
-    const authMessage = {
-      buyer:               address,
-      sellerUsdcRecipient: selectedOffer.payload.sellerUsdcRecipient,
-      sellerCsdScriptHash: scriptHash32,
-      csdGenesisHash:      CSD_GENESIS_HASH,
-      tradeIntentHash:     selectedOffer.objectHash as Hex, // binds auth to this offer
-      csdAmount:           csdAmount,
-      usdc:                USDC_ADDRESS,
-      usdcAmount:          usdcAmount,
-      minConfirmations:    BigInt(selectedOffer?.payload?.minConfirmations ?? 1),
-      executorFeeAmount:   BigInt(selectedOffer?.payload?.executorFeeAmount ?? 0),
-      validAfter:          BigInt(now - 60),
-      validBefore:         BigInt(now + 3600),
-      nonce:               randomHex32(),
-    };
+  // ── Actions ─────────────────────────────────────────────────────────────────
 
-    setLoading("Sign authorization in wallet...");
+  async function submitOrder() {
+    const trader = requireReady();
+    if (!trader || !preview || blocking || !preview.orderPrice || preview.orderBase === 0n) return;
+    // Re-match against the latest book right before signing
+    const m = matchOrder({ book: orders, market, side, amount: amount!, limit, me });
+    if (m.selfCross) { setStatus("This would trade against your own order."); return; }
+    const price = orderType === "limit" ? limit! : m.worstPrice!;
+    const base  = orderType === "limit" ? amount! : m.filled;
+    if (base === 0n) { setStatus("Nothing to match."); return; }
+
+    const sideNum = side === "buy" ? SIDE_BUY_BASE : SIDE_SELL_BASE;
+    const maxFee  = side === "buy" ? EXECUTOR_FEE_QUOTE * MAX_FILLS_PER_ORDER : 0n;
+    const need    = side === "buy" ? quoteFor(base, price) + maxFee : base;
+
     try {
-      const sig = await signTypedDataAsync({
-        domain:      getCsdUsdcDomain(),
-        types:       CSD_USDC_TYPES,
-        primaryType: "CsdUsdcAuthorization",
-        message:     authMessage,
+      // Selling ETH: wrap whatever the wallet's WETH doesn't cover
+      const shortfall = side === "sell" && isEthMarket && base > baseAvail ? base - baseAvail : 0n;
+      if (shortfall > 0n && !DEMO_MODE && publicClient) {
+        if (shortfall > wrappable) { setStatus(`Not enough ETH. Keep at least ${fmt(NATIVE_GAS_RESERVE, 18)} ETH for gas.`); return; }
+        setLoading(`Wrap ${fmtBase(market, shortfall)} ETH in your wallet...`);
+        const wtx = await writeContractAsync({ address: market.base.address, abi: wethAbi, functionName: "deposit", value: shortfall });
+        setLoading("Wrapping ETH...");
+        await publicClient.waitForTransactionReceipt({ hash: wtx });
+        addLog(`Wrapped ${fmtBase(market, shortfall)} ETH for this sell.`);
+        refetchReads(); refetchNative();
+      }
+
+      await ensureAllowance(payToken, need);
+
+      const auth = buildAuthMessage({
+        market, grantor: trader, side: sideNum, baseAmount: base, limitPrice: price, maxFee,
+        ttlSecs: orderType === "limit" ? MAKER_ORDER_TTL_SECS : MARKET_ORDER_TTL_SECS,
       });
+      setLoading("Sign 1 of 2: authorization...");
+      const authSig = await signTypedDataAsync({
+        domain: getEvmSpotDomain(), types: AUTH_TYPES, primaryType: "TradingSessionAuthorization",
+        message: authForSigning(auth) as any,
+      });
+      const authObj = authObject(finalize, auth, authSig as Hex);
 
-      // Normalize message for AON object (string values)
-      const authForPayload = {
-        ...authMessage,
-        csdAmount:           authMessage.csdAmount.toString(),
-        usdcAmount:          authMessage.usdcAmount.toString(),
-        minConfirmations:    authMessage.minConfirmations.toString(),
-        executorFeeAmount:   authMessage.executorFeeAmount.toString(),
-        validAfter:          authMessage.validAfter.toString(),
-        validBefore:         authMessage.validBefore.toString(),
-      };
+      const order = buildOrderMessage({ market, trader, side: sideNum, price, baseAmount: base, auth, receiveNative });
+      setLoading("Sign 2 of 2: order...");
+      const orderSig = await signTypedDataAsync({
+        domain: getEvmSpotDomain(), types: ORDER_TYPES, primaryType: "SignedOrder",
+        message: orderForSigning(order) as any,
+      });
+      const orderObj = orderObject(finalize, authObj.objectHash, order, orderSig as Hex);
 
-      const domain = getCsdUsdcDomain();
-
-      const authObj = finalizeObj({
-        objectType: "authorization", schemaVersion: "1", namespace: "aon:csd-usdc",
-        createdAt: Date.now(), references: [],
-        payload: { authorizationType: "csd_usdc_release", authorization: authForPayload },
-        signature: {
-          scheme: "eip712", signer: address, domain,
-          types: CSD_USDC_TYPES, primaryType: "CsdUsdcAuthorization",
-          message: authForPayload, signature: sig,
-        },
-      } as any);
-
-      const reserveObj = finalizeObj({
-        objectType: "reserve", schemaVersion: "1", namespace: "aon:csd-usdc",
-        createdAt: Date.now(), references: [authObj.objectHash],
-        payload: { reserveType: "csd_usdc_intent" },
-      } as any);
-
+      setLoading("Publishing to AON...");
       await aonPutObject(authObj);
-      await aonPutObject(reserveObj);
+      await aonPutObject(orderObj);
+      addLog(`Order ${shortHash(orderObj.objectHash)}: ${side} ${fmtBase(market, base)} ${B} @ ${fmtPrice(market, price)}`);
 
-      addLog(`Authorization: ${authObj.objectHash}`);
-      addLog(`Reserve: ${reserveObj.objectHash}`);
-      setStatus("Authorization created. Waiting for seller to lock settlement.");
-      setSettlementStatus("auth_active");
-      await refresh();
-    } finally { setLoading(null); }
-  }
-
-  async function cancelSellOffer() {
-    if (!mySellOffer || !finalizeObj) return;
-    setLoading("Cancelling offer...");
-    try {
-      const revocation = finalizeObj({
-        objectType: "revocation", schemaVersion: "1", namespace: "aon:csd-usdc",
-        createdAt: Date.now(), references: [mySellOffer.objectHash],
-        payload: { reason: "seller_cancelled" },
-      } as any);
-      await aonPutObject(revocation);
-      setMySellOffer(null);
-      setStatus("Sell offer cancelled.");
-      addLog(`Offer cancelled: ${mySellOffer.objectHash}`);
-    } finally { setLoading(null); }
-  }
-
-  // Seller locks USDC — called by seller once they're ready to send CSD
-  async function lockSettlement() {
-    if (!matchedAuth || !address) return;
-
-    if (DEMO_MODE) {
-      // Simulate lock in demo mode
-      setLockedAmount(BigInt(matchedAuth.payload.authorization.usdcAmount));
-      setLockedUntilTs(Math.floor(Date.now() / 1000) + 600);
-      setSettlementStatus("locked");
-      addLog("Demo: USDC lock simulated.");
-      setStatus("Demo mode: USDC locked. Send CSD and submit txid.");
-      return;
-    }
-
-    const a = matchedAuth.payload.authorization;
-    const authTuple = {
-      buyer:               a.buyer,
-      sellerUsdcRecipient: a.sellerUsdcRecipient,
-      sellerCsdScriptHash: a.sellerCsdScriptHash as Hex,
-      csdGenesisHash:      a.csdGenesisHash as Hex,
-      tradeIntentHash:     a.tradeIntentHash as Hex,
-      csdAmount:           BigInt(a.csdAmount),
-      usdc:                a.usdc,
-      usdcAmount:          BigInt(a.usdcAmount),
-      minConfirmations:    BigInt(selectedOffer?.payload?.minConfirmations ?? a?.minConfirmations ?? 1),
-      executorFeeAmount:   BigInt(a.executorFeeAmount ?? 0),
-      validAfter:          BigInt(a.validAfter),
-      validBefore:         BigInt(a.validBefore),
-      nonce:               a.nonce as Hex,
-    };
-
-    setLoading("Locking USDC...");
-    try {
-      setLoading("Locking USDC...");
-      const lockHash = await writeContractAsync({
-        address: SETTLEMENT_CONTRACT, abi: csdUsdcSettlementAbi,
-        functionName: "lockCsdUsdcAuthorization",
-        args: [authTuple, matchedAuth.signature.signature],
-      });
-      setLoading("Waiting for confirmation...");
-      await publicClient?.waitForTransactionReceipt({ hash: lockHash });
-      addLog(`Lock tx: ${lockHash}`);
-      setStatus("USDC locked. You can now safely send CSD to the buyer's address.");
-      await refresh();
-    } finally { setLoading(null); }
-  }
-
-  // Claims refund of expired USDC lock back to buyer.
-  // Permissionless — anyone can call after the window expires.
-  async function claimRefund() {
-    const auth = myBuyerAuth ?? matchedAuth;
-    if (!auth) return;
-    const a = auth.payload.authorization;
-
-    const authTuple = {
-      buyer:               a.buyer,
-      sellerUsdcRecipient: a.sellerUsdcRecipient,
-      sellerCsdScriptHash: a.sellerCsdScriptHash as Hex,
-      csdGenesisHash:      a.csdGenesisHash as Hex,
-      tradeIntentHash:     a.tradeIntentHash as Hex,
-      csdAmount:           BigInt(a.csdAmount),
-      usdc:                a.usdc,
-      usdcAmount:          BigInt(a.usdcAmount),
-      minConfirmations:    BigInt(selectedOffer?.payload?.minConfirmations ?? a?.minConfirmations ?? 1),
-      executorFeeAmount:   BigInt(a.executorFeeAmount ?? 0),
-      validAfter:          BigInt(a.validAfter),
-      validBefore:         BigInt(a.validBefore),
-      nonce:               a.nonce as Hex,
-    };
-
-    setLoading("Refunding USDC to buyer...");
-    try {
-      const tx = await writeContractAsync({
-        address: SETTLEMENT_CONTRACT,
-        abi: csdUsdcSettlementAbi,
-        functionName: "refundExpiredLock",
-        args: [authTuple],
-      });
-      addLog(`Refund tx: ${tx}`);
-      setStatus("Refund submitted. USDC is returning to buyer.");
-      await refresh();
-    } catch (err: any) {
-      setStatus(`Refund error: ${(err?.shortMessage ?? err?.message ?? "").slice(0, 120)}`);
-    } finally { setLoading(null); }
-  }
-
-  // Seller calls settleCsdUsdc directly — used when buyer revoked on AON
-  // to block the executor. The contract only checks the SPV proof, not revocations.
-  async function settleDirectly() {
-    if (!csdTxid || !matchedAuth || !finalizeObj) return;
-    const a = matchedAuth.payload.authorization;
-
-    setLoading("Fetching CSD proof...");
-    try {
-      const proof = await fetchCsdProof(csdTxid.trim());
-      addLog(`CSD proof: ${proof.confirmations} confirmation(s)`);
-
-      const authTuple = {
-        buyer:               a.buyer,
-        sellerUsdcRecipient: a.sellerUsdcRecipient,
-        sellerCsdScriptHash: a.sellerCsdScriptHash as Hex,
-        csdGenesisHash:      a.csdGenesisHash as Hex,
-        tradeIntentHash:     a.tradeIntentHash as Hex,
-        csdAmount:           BigInt(a.csdAmount),
-        usdc:                a.usdc,
-        usdcAmount:          BigInt(a.usdcAmount),
-        minConfirmations:    BigInt(selectedOffer?.payload?.minConfirmations ?? a?.minConfirmations ?? 1),
-        executorFeeAmount:   BigInt(a.executorFeeAmount ?? 0),
-        validAfter:          BigInt(a.validAfter),
-        validBefore:         BigInt(a.validBefore),
-        nonce:               a.nonce as Hex,
-      };
-
-      const spvProof = {
-        txRaw:       proof.tx_raw as Hex,
-        merkleBranch: (proof.merkle_branch ?? []).map((step: any) => ({
-          hash:   step.hash as Hex,
-          isLeft: step.position === "left" || step.isLeft === true,
-        })),
-        header: {
-          version: Number(proof.header.version),
-          prev:    proof.header.prev as Hex,
-          merkle:  proof.header.merkle as Hex,
-          time:    BigInt(proof.header.time),
-          bits:    Number(proof.header.bits),
-          nonce:   Number(proof.header.nonce),
-        },
-        genesisHash:       proof.genesis_hash as Hex,
-        confirmationChain: (proof.confirmation_chain ?? []).map((h: any) => ({
-          version: Number(h.version),
-          prev:    h.prev as Hex,
-          merkle:  h.merkle as Hex,
-          time:    BigInt(h.time),
-          bits:    Number(h.bits),
-          nonce:   Number(h.nonce),
-        })),
-      };
-
-      setLoading("Submitting settlement tx from your wallet...");
-      const tx = await writeContractAsync({
-        address: SETTLEMENT_CONTRACT,
-        abi: csdUsdcSettlementAbi,
-        functionName: "settleCsdUsdc",
-        args: [authTuple, matchedAuth.signature.signature as Hex, spvProof],
-      });
-      addLog(`Direct settlement tx: ${tx}`);
-      setStatus("Settlement submitted directly. USDC will release once confirmed.");
-      await refresh();
-    } catch (err: any) {
-      const msg = err?.message ?? "Unknown error";
-      if (msg.includes("NOT_FOUND") || msg.includes("404")) {
-        setStatus("CSD transaction not found yet. Wait for it to be mined.");
-      } else {
-        setStatus(`Error: ${msg.slice(0, 120)}`);
-      }
-    } finally { setLoading(null); }
-  }
-
-  // Polls the covenant-server until the CSD tx has enough confirmations.
-  // Called when seller enters a txid — shows live progress before enabling submit.
-  async function pollConfirmations(txid: string) {
-    if (!txid || !matchedAuth) return;
-    const required = Number(matchedAuth.payload.authorization.minConfirmations ?? 1);
-    // Cancel any in-progress poll before starting a new one
-    pollingRef.current = false;
-    await new Promise(r => setTimeout(r, 50)); // let previous loop exit
-    pollingRef.current = true;
-    setCheckingConfs(true);
-    setConfirmationCount(0);
-    try {
-      while (pollingRef.current) {
-        const pr = await fetchCsdProof(txid.trim(), required).catch(() => null);
-        if (!pollingRef.current) break; // cancelled while awaiting
-        const count = pr?.confirmations ?? 0;
-        setConfirmationCount(count);
-        if (count >= required) break;
-        // Wait 15s but check cancellation every 500ms
-        for (let i = 0; i < 30 && pollingRef.current; i++) {
-          await new Promise(r => setTimeout(r, 500));
+      // Fills against the book, at each resting order's price
+      const feeUsed = new Map<string, bigint>();
+      for (const leg of m.legs) {
+        let fee = EXECUTOR_FEE_QUOTE;
+        if (side === "sell") { // resting buyer pays, within their remaining fee budget
+          const k = leg.order.orderObj.objectHash;
+          const left = leg.order.feeBudgetLeft - (feeUsed.get(k) ?? 0n);
+          fee = minBig(fee, left > 0n ? left : 0n);
+          feeUsed.set(k, (feeUsed.get(k) ?? 0n) + fee);
         }
+        const f = fillObject(finalize, {
+          makerAuthHash: leg.order.authObj.objectHash, takerAuthHash: authObj.objectHash,
+          makerOrderHash: leg.order.orderObj.objectHash, takerOrderHash: orderObj.objectHash,
+          price: leg.price, baseAmount: leg.base, executorFee: fee,
+        });
+        await aonPutObject(f);
+        addLog(`Fill ${fmtBase(market, leg.base)} ${B} @ ${fmtPrice(market, leg.price)}`);
       }
-    } finally {
-      setCheckingConfs(false);
-    }
+
+      const parts: string[] = [];
+      if (m.filled > 0n) parts.push(`${side === "buy" ? "Bought" : "Sold"} ${fmtBase(market, m.filled)} ${B}, settling on Ethereum`);
+      if (orderType === "limit" && m.remainder > 0n) parts.push(`${fmtBase(market, m.remainder)} ${B} resting at ${fmtPrice(market, price)}`);
+      setStatus(parts.join(". ") + ".");
+      setAmountHuman("");
+      await refresh();
+    } catch (err) {
+      setStatus(errorText(err));
+    } finally { setLoading(null); }
   }
 
-  // Seller submits CSD txid — creates proof object on AON
-  async function submitCsdProof() {
-    if (!csdTxid || !matchedAuth || !finalizeObj) return;
-
-    const a = matchedAuth.payload.authorization;
-    setLoading("Fetching CSD proof...");
+  // Free cancel: a signed revocation on AON. Executors and every Covenant
+  // interface stop matching the order immediately.
+  // On-chain cancel additionally revokes the authorization in the contract,
+  // so nobody can settle the order even by calling the contract directly.
+  async function cancelOrder(o: RestingOrder, onChain = false) {
+    if (!requireReady()) return;
     try {
-      const proof = await fetchCsdProof(csdTxid.trim());
-      addLog(`CSD proof: ${proof.confirmations} confirmations`);
+      const msg = revocationMessage(o.authObj);
+      setLoading("Sign cancellation...");
+      const sig = await signTypedDataAsync({
+        domain: getEvmSpotDomain(), types: REVOCATION_TYPES, primaryType: "AonRevocation", message: msg,
+      });
+      await aonPutObject(revocationObject(finalize, o.authObj, msg, sig as Hex));
+      addLog(`Cancelled ${shortHash(o.orderObj.objectHash)}`);
 
-      // Proof must reference the RESERVE (not the auth) — executor walks proof→reserve→auth
-      const proofRef = matchedReserveHash ?? matchedAuth.objectHash;
-      const proofObj = finalizeObj({
-        objectType: "proof", schemaVersion: "1", namespace: "aon:csd-usdc",
-        createdAt: Date.now(), references: [proofRef],
-        payload: {
-          proofType: "csd_payment",
-          txid: csdTxid.trim(),
-          proof,
-          expectedRecipientScriptPubKey: a.sellerCsdScriptHash,
-          expectedAmount: a.csdAmount,
-          minConfirmations: Number(a.minConfirmations),
-        },
-      } as any);
-
-      await aonPutObject(proofObj);
-      addLog(`Proof object: ${proofObj.objectHash}`);
-      setStatus("Proof submitted. The executor is settling and USDC will release shortly.");
+      if (onChain && publicClient && !DEMO_MODE) {
+        setLoading("Confirm on-chain cancel in wallet...");
+        const a = o.authObj.payload.authorization;
+        const tx = await writeContractAsync({
+          address: SETTLEMENT_CONTRACT, abi: evmSpotSettlementAbi, functionName: "revokeAuthorization",
+          args: [{
+            grantor: a.grantor, settlementContract: a.settlementContract, baseToken: a.baseToken, quoteToken: a.quoteToken,
+            marketId: a.marketId, sideMask: Number(a.sideMask),
+            maxBaseExposure: BigInt(a.maxBaseExposure), maxQuoteExposure: BigInt(a.maxQuoteExposure),
+            maxExecutorFeeQuote: BigInt(a.maxExecutorFeeQuote), minPrice: BigInt(a.minPrice), maxPrice: BigInt(a.maxPrice),
+            validAfter: BigInt(a.validAfter), validBefore: BigInt(a.validBefore), authNonce: a.authNonce,
+          }],
+        });
+        setLoading("Waiting for on-chain cancel...");
+        await publicClient.waitForTransactionReceipt({ hash: tx });
+        addLog(`Revoked on-chain: ${shortHash(tx)}`);
+        setStatus("Order cancelled on AON and in the settlement contract.");
+      } else {
+        setStatus("Order cancelled.");
+      }
       await refresh();
-    } catch (err: any) {
-      const msg = err?.message ?? "Unknown error";
-      if (msg.includes("NOT_FOUND")) setStatus("CSD transaction not found yet. Wait for it to be mined.");
-      else if (msg.includes("CONFIRMATIONS")) setStatus("Not enough confirmations yet. Wait for the next CSD block.");
-      else setStatus(`Proof error: ${msg}`);
+    } catch (err) {
+      setStatus(errorText(err));
+    } finally { setLoading(null); }
+  }
+
+  // Loose WETH (not backing any order) back to ETH
+  async function unwrapWeth(amount: bigint) {
+    if (!requireReady() || !publicClient || amount === 0n) return;
+    try {
+      setLoading("Confirm in your wallet...");
+      const tx = await writeContractAsync({ address: TOKENS.WETH.address, abi: wethAbi, functionName: "withdraw", args: [amount] });
+      setLoading("Converting to ETH...");
+      await publicClient.waitForTransactionReceipt({ hash: tx });
+      addLog(`Converted ${fmt(amount, 18)} WETH to ETH.`);
+      setStatus(`Converted ${fmt(amount, 18)} WETH to ETH.`);
+      refetchReads(); refetchNative();
+    } catch (err) {
+      setStatus(errorText(err));
     } finally { setLoading(null); }
   }
 
   if (!mounted) return null;
 
   const isWrongChain = isConnected && chainId !== CHAIN_ID;
-  const windowRemaining = lockedUntilTs > 0 ? Math.max(0, lockedUntilTs - nowSecs) : 0;
-  const buyerCsdAddr = myBuyerAuth?.payload?.authorization?.sellerCsdScriptHash
-    ? "0x" + myBuyerAuth.payload.authorization.sellerCsdScriptHash.slice(2, 42)
-    : null;
+  const spread = asks[0] && bids[0] ? asks[0].price - bids[0].price : null;
+
+  // ── The covenant: the order, in the words you're agreeing to ────────────────
+  const clause = (() => {
+    if (!preview || preview.selfCross || !preview.orderPrice || preview.orderBase === 0n) return null;
+    const expiry = new Date((nowSecs + (orderType === "limit" ? MAKER_ORDER_TTL_SECS : MARKET_ORDER_TTL_SECS)) * 1000)
+      .toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+    const amt = `${fmtBase(market, preview.orderBase)} ${B}`;
+    const px  = `${fmtPrice(market, preview.orderPrice)} ${Q}`;
+    const sentences: string[] = [];
+    if (orderType === "limit") {
+      sentences.push(side === "buy"
+        ? `I will buy up to ${amt} at no more than ${px} each, spending at most ${fmtQuote(market, preview.cost)} ${Q}.`
+        : `I will sell up to ${amt} at no less than ${px} each, receiving at least ${fmtQuote(market, preview.cost)} ${Q}.`);
+      if (preview.filled > 0n)
+        sentences.push(`${fmtBase(market, preview.filled)} ${B} fills right away at an average of ${fmtPrice(market, preview.avgPrice!)} ${Q}.`);
+      if (preview.remainder > 0n)
+        sentences.push(`${preview.filled > 0n ? "The rest" : "The order"} waits in the book until ${expiry}, or until I cancel it.`);
+    } else {
+      sentences.push(side === "buy"
+        ? `I will buy ${amt} from the best offers in the book, paying no more than ${px} each and ${fmtQuote(market, preview.quote)} ${Q} in total.`
+        : `I will sell ${amt} to the best bids in the book, at no less than ${px} each, for ${fmtQuote(market, preview.quote)} ${Q} in total.`);
+      sentences.push("Nothing is left waiting in the book.");
+    }
+    if (preview.fee > 0n) sentences.push(`I pay the executor ${fmtQuote(market, preview.fee)} ${Q}.`);
+    if (wrapNeeded > 0n) sentences.unshift(`First I wrap ${fmtBase(market, wrapNeeded)} ETH so it can be traded.`);
+    if (side === "buy" && isEthMarket && !receiveNative) sentences.push("I receive it as WETH, ready to sell again without wrapping.");
+    return sentences.join(" ");
+  })();
+
+  const levelRow = (l: Level, s: Side) => {
+    const pct = Number((l.cum * 1000n) / maxCum) / 10;
+    return (
+      <button key={`${s}-${l.price}`} className="book-row" onClick={() => pickLevel(l, s)}
+        style={{ ["--depth" as any]: `${pct}%` }} data-side={s}
+        title={s === "sell" ? `Buy up to ${fmtBase(market, l.cum)} ${B} at ${fmtPrice(market, l.price)} or better` : `Sell up to ${fmtBase(market, l.cum)} ${B} at ${fmtPrice(market, l.price)} or better`}>
+        <span className={s}>{fmtPrice(market, l.price)}{l.mine && <span className="mine-dot" title="Includes your order" />}</span>
+        <span>{fmtBase(market, l.size)}</span>
+        <span className="muted">{fmtQuote(market, l.total)}</span>
+      </button>
+    );
+  };
+
+  const timeline = (f: FillView) => (
+    <span className="timeline" aria-label={f.status === "settled" ? "Settled" : f.status === "pending" ? "Settling" : "Not settled"}>
+      <span className="step done">Signed</span>
+      <span className="bar done" />
+      <span className="step done">Matched</span>
+      <span className={`bar ${f.status === "settled" ? "done" : ""}`} />
+      <span className={`step ${f.status === "settled" ? "done" : f.status === "pending" ? "now" : "fail"}`}>
+        {f.status === "settled" ? "Settled" : f.status === "pending" ? "Settling" : "Not settled"}
+      </span>
+    </span>
+  );
 
   return (
-    <main style={{ maxWidth: 1100, margin: "0 auto", padding: "40px 20px 80px" }}>
+    <main style={{ maxWidth: 1240, margin: "0 auto", padding: "0 24px" }}>
 
-      {/* Header */}
-      <header style={{ marginBottom: 56 }}>
-        <div className="page-header">
-          <div>
-            <div style={{ fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 600 }}>Covenant</div>
-            <h1 style={{ fontSize: 44, lineHeight: 1.1, margin: "12px 0 0", maxWidth: 700 }}>
-              Execution no longer requires trust.
-            </h1>
-            <p className="muted" style={{ marginTop: 12, maxWidth: 600, fontSize: 17 }}>
-              CSD/USDC settlement. Trustless, on-chain SPV verified.
-            </p>
-          </div>
-          <div className="page-header-right">
-            <div className="row">
-              {isConnected ? (
-                <>
-                  <span className="muted" style={{ fontSize: 14 }}>{short(address)}</span>
-                  {isWrongChain && <span className="tag tag-red">Wrong network</span>}
-                  <button className="btn-secondary" style={{ fontSize: 13, padding: "7px 14px" }} onClick={() => disconnect()}>
-                    Disconnect
-                  </button>
-                </>
-              ) : (
-                <button className="btn" onClick={() => connect({ connector: injected() })}>
-                  Connect wallet
-                </button>
-              )}
+      {/* Hero */}
+      <section className="hero" style={guideOpen ? undefined : { gridTemplateColumns: "1fr" }}>
+        <div>
+          <div className="hero-arc"><Arc width={500} sagitta={17} thickness={1.5} draw style={{ width: "100%", height: "auto" }} /></div>
+          <h1 className="hero-title">Execution no longer requires trust.</h1>
+          <p className="hero-sub">
+            Trade ETH, LINK and QNT for USDT from your own wallet. Nobody holds your
+            funds. They move only when your exact terms are met, in a single
+            Ethereum transaction.
+          </p>
+        </div>
+        {guideOpen && (
+          <aside className="steps" aria-label="How trading works">
+            <div className="row-between">
+              <span className="panel-title">New here? It takes three steps.</span>
+              <button className="link-btn muted" onClick={hideGuide}>Hide</button>
             </div>
-            <a
-              href={`https://explorer.aon.network`}
-              target="_blank" rel="noreferrer"
-              className="muted"
-              style={{ fontSize: 12 }}
-            >
-              AON Explorer ↗
-            </a>
-          </div>
-        </div>
-      </header>
+            <ol>
+              <li><div><strong>Connect a wallet</strong><span>Any Ethereum wallet. Covenant never takes custody.</span></div></li>
+              <li><div><strong>Sign your order</strong><span>Free, no gas. Your tokens stay in your wallet while it waits.</span></div></li>
+              <li><div><strong>It settles on Ethereum</strong><span>Both sides swap in one transaction, or nothing moves.</span></div></li>
+            </ol>
+          </aside>
+        )}
+      </section>
 
-      {/* Demo mode banner */}
       {DEMO_MODE && (
-        <div style={{
-          background: "rgba(154,104,0,0.07)", border: "1px solid rgba(255,214,102,0.25)",
-          borderRadius: 8, padding: "10px 16px", marginBottom: 18,
-          display: "flex", alignItems: "center", gap: 10,
-        }}>
-          <span className="warn" style={{ fontSize: 13, fontWeight: 500 }}>DEMO MODE</span>
-          <span className="muted" style={{ fontSize: 13 }}>
-            USDC balances and contract calls are simulated. AON object creation is real.
-          </span>
+        <div className="banner banner-warn">
+          <strong className="warn">Demo mode</strong>
+          <span className="muted">Balances and approvals are simulated. Orders are still published to AON.</span>
         </div>
       )}
-
-      {/* Node unreachable banner */}
+      {!SETTLEMENT_CONTRACT && (
+        <div className="banner banner-danger">
+          <strong className="danger">Trading isn't set up yet</strong>
+          <span className="muted">Set NEXT_PUBLIC_EVM_SPOT_SETTLEMENT to the deployed settlement contract.</span>
+        </div>
+      )}
       {nodeUnreachable && (
-        <div style={{
-          background: "rgba(192,57,43,0.06)", border: "1px solid rgba(192,57,43,0.2)",
-          borderRadius: 5, padding: "10px 16px", marginBottom: 18,
-          display: "flex", alignItems: "center", gap: 10,
-        }}>
-          <span className="danger" style={{ fontSize: 13, fontWeight: 500 }}>Cannot reach AON node</span>
-          <span className="muted" style={{ fontSize: 13 }}>
-            Retrying automatically. The network may be temporarily unavailable.
-          </span>
+        <div className="banner banner-danger">
+          <strong className="danger">Can't reach the AON network</strong>
+          <span className="muted">The order book may be out of date. Retrying automatically.</span>
         </div>
       )}
-
-      {/* Status banner */}
       {status && (
-        <div className="card" style={{ marginBottom: 18, borderColor: "rgba(26,102,64,0.10)" }}>
-          <div className="faint">Status</div>
-          <div style={{ marginTop: 8, fontSize: 17 }}>{status}</div>
+        <div className="banner banner-info" role="status">
+          <span>{status}</span>
+          <button className="link-btn" style={{ marginLeft: "auto" }} onClick={() => setStatus("")}>Dismiss</button>
         </div>
       )}
 
-      {/* Market header */}
-      <div className="card" style={{ marginBottom: 18 }}>
-        <div className="row-between">
-          <div>
-            <div className="faint">Market</div>
-            <div style={{ fontSize: 20, marginTop: 6 }}>CSD / USDC</div>
-          </div>
-          <div className="row" style={{ gap: 8 }}>
-            <button
-              className={mode === "buy" ? "btn" : "btn-secondary"}
-              onClick={() => setMode("buy")}
-            >Buy CSD</button>
-            <button
-              className={mode === "sell" ? "btn" : "btn-secondary"}
-              onClick={() => setMode("sell")}
-            >Sell CSD</button>
-          </div>
+      {/* Market bar */}
+      <div className="market-bar">
+        <div className="market-tabs" role="tablist" aria-label="Market">
+          {MARKETS.map(m => (
+            <button key={m.key} role="tab" aria-selected={m.key === market.key}
+              className={m.key === market.key ? "tab tab-on" : "tab"} onClick={() => setMarketKey(m.key)}>
+              {m.label}
+            </button>
+          ))}
+        </div>
+        <div className="market-stats">
+          <div><div className="stat-label">Last price</div><div className="stat">{lastPrice !== undefined ? fmtPrice(market, lastPrice) : "—"}</div></div>
+          <div><div className="stat-label">Best bid</div><div className="stat buy">{bids[0] ? fmtPrice(market, bids[0].price) : "—"}</div></div>
+          <div><div className="stat-label">Best ask</div><div className="stat sell">{asks[0] ? fmtPrice(market, asks[0].price) : "—"}</div></div>
+          <div><div className="stat-label">Trades</div><div className="stat">{settledTrades.length}</div></div>
         </div>
       </div>
+      {market.note && <p className="market-note">{market.note}</p>}
 
-      <div className="market-grid">
+      <div className="exchange-grid">
 
-        {/* Sell book */}
-        <div className="col">
-          <div className="card">
-            <div className="faint" style={{ marginBottom: 14 }}>Sell book</div>
-            {nodeUnreachable ? (
-              <div className="muted" style={{ fontSize: 13 }}>Cannot reach network.</div>
-            ) : !initialLoadDone ? (
-              <div className="muted">Loading...</div>
-            ) : sellBook.length === 0 ? (
-              <div className="muted">No open sell offers.</div>
-            ) : (
-              <div className="col" style={{ gap: 8 }}>
-                {sellBook.map(offer => (
-                  <div
-                    key={offer.objectHash}
-                    className="card-inner"
-                    onClick={() => mode === "buy" && setSelectedOffer(offer)}
-                    style={{
-                      cursor: mode === "buy" ? "pointer" : "default",
-                      borderColor: selectedOffer?.objectHash === offer.objectHash
-                        ? "rgba(26,102,64,0.22)"
-                        : undefined,
-                    }}
-                  >
-                    <div className="row-between">
-                      <div>
-                        <div style={{ fontSize: 18 }}>{formatCsd(offer.payload.csdAmount)} CSD</div>
-                        <div className="muted" style={{ fontSize: 14, marginTop: 3 }}>
-                          {formatUsdc(offer.payload.usdcAmount)} USDC
-                          {offer.payload.pricePerCsd && ` · ${offer.payload.pricePerCsd} USDC/CSD`}
-                          {Number(offer.payload.executorFeeAmount ?? 0) > 0 && (
-                            <span> · +{formatUsdc(offer.payload.executorFeeAmount)} executor fee</span>
-                          )}
+        {/* Order book */}
+        <section className="card" aria-label="Order book" style={{ padding: "18px 14px" }}>
+          <div className="row-between" style={{ margin: "0 6px 12px" }}>
+            <h2 className="panel-title" style={{ fontFamily: "var(--sans)" }}>Order book</h2>
+            <span className="faint">Tap a price to trade it</span>
+          </div>
+          <div className="book-head">
+            <span>Price ({Q})</span><span>Size ({B})</span><span>Total ({Q})</span>
+          </div>
+          {!initialLoadDone ? (
+            <div className="book-empty">Loading the book…</div>
+          ) : (
+            <>
+              <div className="book-side book-asks">
+                {asks.length === 0
+                  ? <div className="book-empty">No one is selling {B} yet. A sell order you place will be first in line.</div>
+                  : [...asks].reverse().map(l => levelRow(l, "sell"))}
+              </div>
+              <div className="book-spread">
+                <span className="last">{lastPrice !== undefined ? fmtPrice(market, lastPrice) : "—"}</span>
+                <span className="faint">{spread !== null ? `Spread ${fmtPrice(market, spread > 0n ? spread : 0n)}` : "Last price"}</span>
+              </div>
+              <div className="book-side">
+                {bids.length === 0
+                  ? <div className="book-empty">No one is buying {B} yet. A buy order you place will be first in line.</div>
+                  : bids.map(l => levelRow(l, "buy"))}
+              </div>
+            </>
+          )}
+        </section>
 
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-                        {mode === "buy" && (
-                          <button
-                            className="btn-accent"
-                            style={{ fontSize: 13, padding: "4px 12px" }}
-                            onClick={(e) => { e.stopPropagation(); setSelectedOffer(offer); }}
-                          >
-                            Select
-                          </button>
-                        )}
-                        {(() => {
-                          const secs = secondsLeft(offer.payload.validBefore);
-                          const urgent = secs < 3600;
-                          return (
-                            <span style={{ fontSize: 12, color: urgent ? "var(--warn)" : "var(--muted)" }}>
-                              {urgent ? "expires " : ""}{formatCountdown(secs)}
-                            </span>
-                          );
-                        })()}
-                      </div>
-                    </div>
-                    <div className="mono faint" style={{ marginTop: 8 }}>
-                      {shortHash(offer.objectHash)} ·{" "}
-                      <a
-                        href={`https://explorer.aon.network?hash=${offer.objectHash}`}
-                        target="_blank" rel="noreferrer"
-                        onClick={e => e.stopPropagation()}
-                        style={{ color: "inherit" }}
-                      >
-                        view on AON ↗
-                      </a>
-                    </div>
-                  </div>
+        {/* Order form */}
+        <section className="card order-card grid" aria-label="Place an order" style={{ alignContent: "start", gap: 16 }}>
+          <div className="seg-side" role="radiogroup" aria-label="Buy or sell">
+            <button role="radio" aria-checked={side === "buy"}  className={side === "buy"  ? "side-buy on"  : "side-buy"}  onClick={() => setSide("buy")}>Buy {B}</button>
+            <button role="radio" aria-checked={side === "sell"} className={side === "sell" ? "side-sell on" : "side-sell"} onClick={() => setSide("sell")}>Sell {B}</button>
+          </div>
+          <div className="type-toggle" role="radiogroup" aria-label="Order type">
+            {(["limit", "market"] as const).map(t => (
+              <button key={t} role="radio" aria-checked={orderType === t} className={orderType === t ? "on" : ""} onClick={() => setOrderType(t)}
+                title={t === "limit" ? "Choose your price. Anything that doesn't fill waits in the book." : "Fill now at the best prices available."}>
+                {t === "limit" ? "Limit" : "Market"}
+              </button>
+            ))}
+          </div>
+
+          {orderType === "limit" ? (
+            <div>
+              <label htmlFor="price">{side === "buy" ? "Highest price you'll pay" : "Lowest price you'll accept"}</label>
+              <div className="field-unit">
+                <input id="price" inputMode="decimal" autoComplete="off" value={priceHuman} onChange={e => setPriceHuman(e.target.value)}
+                  placeholder={(side === "buy" ? asks[0] ?? bids[0] : bids[0] ?? asks[0]) ? priceToInput(market, (side === "buy" ? asks[0] ?? bids[0] : bids[0] ?? asks[0])!.price) : "0.00"} />
+                <span className="unit">{Q}</span>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <label>Price</label>
+              <div className="input-like">Best available in the book</div>
+            </div>
+          )}
+
+          <div>
+            <label htmlFor="amount">Amount</label>
+            <div className="field-unit">
+              <input id="amount" inputMode="decimal" autoComplete="off" value={amountHuman} onChange={e => setAmountHuman(e.target.value)} placeholder="0.00" />
+              <span className="unit">{B}</span>
+            </div>
+            {isConnected && (
+              <div className="pct-row" aria-label="Use part of your balance">
+                {[25n, 50n, 75n, 100n].map(p => (
+                  <button key={String(p)} className="pct" onClick={() => setPct(p)}>{p === 100n ? "Max" : `${String(p)}%`}</button>
                 ))}
               </div>
             )}
           </div>
-        </div>
 
-        {/* Trade panel */}
-        <div className="col">
-
-          {/* ── BUY PANEL ── */}
-          {mode === "buy" && (
-            <div className="card grid">
-              <div>
-                <div className="faint" style={{ marginBottom: 8 }}>Buy CSD</div>
-                <h2 style={{ margin: 0 }}>
-                  {selectedOffer
-                    ? `${formatCsd(selectedOffer.payload.csdAmount)} CSD for ${formatUsdc(selectedOffer.payload.usdcAmount)} USDC`
-                    : "Select a sell offer"}
-                </h2>
-              </div>
-
-              {!selectedOffer ? (
-                <div className="muted">Choose an offer from the sell book to continue.</div>
-              ) : settlementStatus === "settled" ? (
-                <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.18)" }}>
-                  <div className="faint">Settled</div>
-                  <div className="accent" style={{ fontSize: 20, marginTop: 8 }}>CSD payment verified. USDC released.</div>
-                  {settledTx && (
-                    <div className="mono faint" style={{ marginTop: 10 }}>
-                      <a href={`https://etherscan.io/tx/${settledTx}`} target="_blank" rel="noreferrer">
-                        View settlement tx ↗
-                      </a>
-                    </div>
-                  )}
-                </div>
-              ) : myBuyerAuth ? (
-                // Already have an active authorization
-                <div className="col">
-                  <div className="card-inner">
-                    <div className="faint">Your authorization</div>
-                    <a href={`https://explorer.aon.network?hash=${myBuyerAuth.objectHash}`} target="_blank" rel="noreferrer" className="mono" style={{ marginTop: 8, fontSize: 12, display: "block" }}>{myBuyerAuth.objectHash}</a>
-                    {buyerCsdAddr && (
-                      <>
-                        <div className="muted" style={{ marginTop: 12, fontSize: 13 }}>
-                          Your CSD receive address:
-                        </div>
-                        <div className="mono" style={{ marginTop: 4 }}>{buyerCsdAddr}</div>
-                        <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>
-                          The seller must send CSD to this address.
-                        </div>
-                      </>
-                    )}
-                  </div>
-
-                  {settlementStatus === "locked" && (
-                    <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.18)" }}>
-                      <div className="faint">Settlement window</div>
-                      <div style={{ marginTop: 10, fontSize: 13, color: "var(--muted)" }}>
-                        {formatUsdc(lockedAmount.toString())} USDC reserved
-                      </div>
-                      {windowRemaining > 0 ? (
-                        <div style={{ marginTop: 14, display: "flex", alignItems: "baseline", gap: 8 }}>
-                          <span style={{ fontSize: 36, lineHeight: 1 }}>
-                            {formatCountdown(windowRemaining)}
-                          </span>
-                          <span className="muted" style={{ fontSize: 13 }}>remaining</span>
-                        </div>
-                      ) : (
-                        <div className="warn" style={{ marginTop: 10, fontSize: 14 }}>
-                          Window expired. Awaiting refund.
-                        </div>
-                      )}
-                      <div className="muted" style={{ marginTop: 12, fontSize: 13 }}>
-                        Seller is sending CSD. Settlement releases your USDC automatically once the proof is verified on-chain.
-                      </div>
-                    </div>
-                  )}
-
-                  {settlementStatus === "auth_active" && (() => {
-                    const expiresIn = secondsLeft(myBuyerAuth!.payload.authorization.validBefore);
-                    const urgent = expiresIn < 600;
-                    const expired = expiresIn === 0;
-                    return expired ? (
-                      <div className="card-inner">
-                        <div className="warn" style={{ fontWeight: 500, marginBottom: 8 }}>Authorization expired</div>
-                        <div className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
-                          The seller did not lock USDC before your authorization expired. Create a new one to try again.
-                        </div>
-                        <button className="btn" onClick={() => {
-                          setMyBuyerAuth(null);
-                          setSettlementStatus("none");
-                          setSelectedOffer(null);
-                        }}>
-                          Start over
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="card-inner">
-                        <div className="faint">Authorization expires in</div>
-                        <div style={{ marginTop: 14, display: "flex", alignItems: "baseline", gap: 8 }}>
-                          <span style={{
-                            fontSize: 36, lineHeight: 1,
-                            color: urgent ? "var(--warn)" : "var(--fg)",
-                          }}>
-                            {formatCountdown(expiresIn)}
-                          </span>
-                        </div>
-                        <div className="muted" style={{ marginTop: 12, fontSize: 13 }}>
-                          Waiting for seller to lock USDC.
-                        </div>
-                      </div>
-                    );
-                  })()}
-                </div>
-              ) : (
-                // No auth yet — show buy form
-                <div className="col">
-                  {!initialLoadDone && isConnected && (
-                    <div className="muted" style={{ fontSize: 13 }}>Checking your active trades...</div>
-                  )}
-                  <div className="card-inner" style={{ borderColor: "rgba(154,104,0,0.10)" }}>
-                    <div className="faint">Trade limit</div>
-                    <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-                      Maximum 30 USDC per trade, enforced by the settlement contract.
-                      3 confirmations (~6 min) required for all trades.
-                    </div>
-                  </div>
-                  <div>
-                    <label>Your CSD receive address (0x + 40 hex)</label>
-                    <input
-                      value={csdReceiveAddr}
-                      onChange={e => setCsdReceiveAddr(e.target.value)}
-                      placeholder="0xabcdef..."
-                    />
-                    {csdBalance > 0n && (
-                      <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-                        Balance at this address: {formatCsd(csdBalance)} CSD
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="card-inner">
-                    {(() => {
-                      const tradeUsdc = BigInt(selectedOffer.payload.usdcAmount);
-                      const execFee   = BigInt(selectedOffer.payload.executorFeeAmount ?? 0);
-                      const totalUsdc = tradeUsdc + execFee;
-                      const sufficient = usdcAllowance >= totalUsdc;
-                      return (
-                        <>
-                          <div className="row-between">
-                            <span className="muted">Trade amount</span>
-                            <span>{formatUsdc(tradeUsdc.toString())} USDC</span>
-                          </div>
-                          {execFee > 0n && (
-                            <div className="row-between" style={{ marginTop: 6 }}>
-                              <span className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                Executor fee
-                                <span style={{ fontSize: 11, color: "var(--faint)", fontStyle: "italic" }}>set by seller</span>
-                              </span>
-                              <span className="muted">{formatUsdc(execFee.toString())} USDC</span>
-                            </div>
-                          )}
-                          <div className="row-between" style={{
-                            marginTop: execFee > 0n ? 8 : 4,
-                            paddingTop: execFee > 0n ? 8 : 0,
-                            borderTop: execFee > 0n ? "1px solid var(--border)" : "none",
-                            fontWeight: 500,
-                          }}>
-                            <span className="muted">Total you pay</span>
-                            <span>{formatUsdc(totalUsdc.toString())} USDC</span>
-                          </div>
-                          <div className="row-between" style={{ marginTop: 8 }}>
-                            <span className="muted">USDC balance</span>
-                            <span>{formatUsdc(usdcBalance)} USDC</span>
-                          </div>
-                          <div className="row-between" style={{ marginTop: 6 }}>
-                            <span className="muted">USDC approved</span>
-                            <span className={sufficient ? "accent" : "warn"}>
-                              {sufficient ? "✓ sufficient" : "insufficient"}
-                            </span>
-                          </div>
-                        </>
-                      );
-                    })()}
-                  </div>
-
-  {(() => {
-                    const total = BigInt(selectedOffer.payload.usdcAmount) + BigInt(selectedOffer.payload.executorFeeAmount ?? 0);
-                    const offerConfs = Number(selectedOffer.payload.minConfirmations ?? 1);
-                    const confCaps: Record<number, bigint> = { 1: 100_000_000n, 2: 500_000_000n, 3: 2_000_000_000n, 4: 5_000_000_000n, 5: 10_000_000_000n, 6: 25_000_000_000n };
-                    const cap = confCaps[offerConfs] ?? 25_000_000_000n;
-                    if (total > cap) return (
-                      <div className="card-inner" style={{ borderColor: "rgba(192,57,43,0.18)" }}>
-                        <div className="danger" style={{ fontSize: 14 }}>
-                          This offer exceeds the {offerConfs}-confirmation contract cap of {formatUsdc(String(cap))} USDC and cannot be settled.
-                        </div>
-                      </div>
-                    );
-                    if (usdcAllowance < total) return (
-                      <button className="btn" onClick={approveUsdc} disabled={!isConnected || !!loading}>
-                        {loading ?? "Approve USDC"}
-                      </button>
-                    );
-                    return (
-                      <button className="btn" onClick={authorizeBuy} disabled={!isConnected || !!loading || !csdReceiveAddr}>
-                        {loading ?? "Authorize buy"}
-                      </button>
-                    );
-                  })()}
-                </div>
-              )}
-            </div>
+          {side === "buy" && isEthMarket && canReceiveNative && (
+            <label className="check">
+              <input type="checkbox" checked={preferWeth} onChange={e => togglePreferWeth(e.target.checked)} />
+              <span>Receive as WETH<span className="faint check-note">For frequent traders: selling later needs no wrapping.</span></span>
+            </label>
           )}
 
-          {/* ── SELL PANEL ── */}
-          {mode === "sell" && (
-            <div className="card grid">
-              <div>
-                <div className="faint" style={{ marginBottom: 8 }}>Sell CSD</div>
+          <div className="summary">
+            <div className="row-between">
+              <span className="muted">Available</span>
+              <span>{isConnected ? `${fmt(payAvail, payToken.decimals)} ${payToken.symbol}` : "Connect a wallet to see"}</span>
+            </div>
+            {isConnected && side === "sell" && isEthMarket && (
+              <div className="faint">
+                {baseAvail > 0n ? `${fmt(baseAvail, 18)} WETH and ${fmt(wrappable, 18)} ETH` : "All ETH"}, keeping {fmt(NATIVE_GAS_RESERVE, 18)} ETH for gas
               </div>
+            )}
+            {isConnected && preview && payAllow < preview.need && (
+              <div className="faint">First trade with {payToken.symbol}: your wallet will ask you to approve it once.</div>
+            )}
+          </div>
 
-              {!mySellOffer ? (
-                // Create sell offer form
-                <div className="col">
-                  <div className="card-inner" style={{ borderColor: "rgba(154,104,0,0.10)" }}>
-                    <div className="faint">Trade limit</div>
-                    <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-                      Maximum 30 USDC per trade. 3 confirmations required (~6 min).
-                      Limits are grounded in network security and will increase as hashrate grows.
-                    </div>
-                  </div>
-                  <div>
-                    <label>CSD amount</label>
-                    <input value={csdAmountHuman} onChange={e => setCsdAmountHuman(e.target.value)} />
-                  </div>
-                  <div>
-                    <label>USDC per CSD</label>
-                    <input value={usdcPerCsd} onChange={e => setUsdcPerCsd(e.target.value)} />
-                  </div>
-                  <div>
-                    <label>Your USDC recipient</label>
-                    <input value={usdcRecipient} onChange={e => setUsdcRecipient(e.target.value)} placeholder={address ?? "0x..."} />
-                  </div>
-                  <div>
-                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 5 }}>
-                      <label style={{ margin: 0 }}>Executor fee (USDC)</label>
-                      <span className="muted" style={{ fontSize: 12 }}>paid by buyer to whoever settles the trade on-chain</span>
-                    </div>
-                    <input
-                      value={executorFeeUsdc}
-                      onChange={e => setExecutorFeeUsdc(e.target.value)}
-                      placeholder="0"
-                    />
-                    <div className="muted" style={{ marginTop: 6, fontSize: 12, lineHeight: 1.6 }}>
-                      The executor is software that submits the settlement transaction on Ethereum.
-                      A non-zero fee incentivizes third parties to run executors and settle trades faster.
-                      Set to 0 if you are running your own executor or do not need fast settlement.
-                    </div>
-                  </div>
-                  <div className="card-inner">
-                    <div className="row-between" style={{ marginBottom: 6 }}>
-                      <span className="muted">Buyer pays</span>
-                      <span style={{ fontSize: 18 }}>
-                        {(Number(csdAmountHuman) * Number(usdcPerCsd) + Number(executorFeeUsdc || 0)).toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC
-                      </span>
-                    </div>
-                    <div className="row-between" style={{ fontSize: 13 }}>
-                      <span className="muted">You receive</span>
-                      <span className="muted">{(Number(csdAmountHuman) * Number(usdcPerCsd)).toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC</span>
-                    </div>
-                    {Number(executorFeeUsdc) > 0 && (
-                      <div className="row-between" style={{ fontSize: 13, marginTop: 2 }}>
-                        <span className="muted">Executor receives</span>
-                        <span className="muted">{Number(executorFeeUsdc).toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC</span>
-                      </div>
-                    )}
-                    <div className="row-between" style={{ fontSize: 13, marginTop: 2 }}>
-                      <span className="muted">Confirmations required</span>
-                      <span className="muted">3 blocks (~6 min)</span>
-                    </div>
-                  </div>
-                  <button
-                    className="btn"
-                    onClick={createSellOffer}
-                    disabled={!isConnected || !!loading}
-                  >
-                    {loading ?? "Create sell offer"}
-                  </button>
+          <div aria-live="polite">
+            {clause ? (
+              <div className="clause">
+                {clause}
+                <div className="clause-sign">
+                  <span>{isConnected ? `Signed by ${shortAddr(address)}` : "Signed by your wallet"}</span>
+                  <span className="sig-line" />
                 </div>
-              ) : !matchedAuth ? (
-                // Waiting for a buyer
-                <div className="col">
-                  <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.10)" }}>
-                    <div className="faint">Your offer is live</div>
-                    <div style={{ fontSize: 20, marginTop: 8 }}>
-                      {formatCsd(mySellOffer.payload.csdAmount)} CSD
-                    </div>
-                    <div className="muted" style={{ marginTop: 6 }}>
-                      {formatUsdc(mySellOffer.payload.usdcAmount)} USDC ·{" "}
-                      {mySellOffer.payload.pricePerCsd} USDC/CSD
-                    </div>
-                    <div className="mono faint" style={{ marginTop: 10 }}>
-                      {shortHash(mySellOffer.objectHash)}
-                    </div>
-                  </div>
-                  <div className="muted" style={{ fontSize: 14 }}>
-                    Waiting for a buyer to create an authorization referencing your offer.
-                  </div>
-                  <button
-                    className="btn-secondary"
-                    onClick={cancelSellOffer}
-                    disabled={!!loading}
-                    style={{ fontSize: 13 }}
-                  >
-                    {loading ?? "Cancel offer"}
-                  </button>
-                </div>
-              ) : (
-                // Have a buyer auth — show lock + settlement flow
-                <div className="col">
-                  <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.12)" }}>
-                    <div className="faint">Buyer authorization received</div>
-                    <div style={{ marginTop: 8, fontSize: 17 }}>
-                      {formatCsd(matchedAuth.payload.authorization.csdAmount)} CSD ·{" "}
-                      {formatUsdc(matchedAuth.payload.authorization.usdcAmount)} USDC
-                    </div>
-                    <div className="mono" style={{ marginTop: 10, fontSize: 12 }}>
-                      {matchedAuth.objectHash}
-                    </div>
-                  </div>
+              </div>
+            ) : (
+              !preview?.selfCross && <p className="clause-empty">Enter {orderType === "limit" ? "a price and an amount" : "an amount"} to see the exact terms you'll sign.</p>
+            )}
+          </div>
 
-                  {lockedAmount === 0n ? (
-                    // Not locked yet — seller locks
-                    <div className="col">
-                      <div className="muted" style={{ fontSize: 14 }}>
-                        Lock USDC to begin settlement. Only lock when you are ready to send CSD immediately.
-                      </div>
-                      <button
-                        className="btn"
-                        onClick={lockSettlement}
-                        disabled={!!loading}
-                      >
-                        {loading ?? "Lock USDC for settlement"}
-                      </button>
-                    </div>
-                  ) : (
-                    // Locked — show CSD send instructions + txid form
-                    <div className="col">
-                      <div className="card-inner" style={{ borderColor: "rgba(26,102,64,0.12)" }}>
-                        <div className="faint">Settlement window</div>
-                        <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>
-                          {formatUsdc(lockedAmount.toString())} USDC reserved
-                        </div>
-                        {windowRemaining > 0 ? (
-                          <div style={{ marginTop: 14, display: "flex", alignItems: "baseline", gap: 8 }}>
-                            <span style={{
-                              fontSize: 36, lineHeight: 1,
-                              color: windowRemaining < 180 ? "var(--danger)" : windowRemaining < 600 ? "var(--warn)" : "var(--fg)",
-                            }}>
-                              {formatCountdown(windowRemaining)}
-                            </span>
-                            <span className="muted" style={{ fontSize: 13 }}>remaining</span>
-                          </div>
-                        ) : lockedAmount > 0n ? (
-                          <div className="col" style={{ gap: 10, marginTop: 10 }}>
-                            <div className="danger" style={{ fontSize: 13 }}>
-                              Window expired. Settlement cannot proceed. Trigger refund to buyer.
-                            </div>
-                            <button className="btn-secondary" onClick={claimRefund} disabled={!!loading}>
-                              {loading ?? "Refund buyer"}
-                            </button>
-                          </div>
-                        ) : null}
-                      </div>
+          {problem && <div className={`form-problem ${blocking ? "danger" : "warn"}`} role="alert">{problem}</div>}
 
-                      {/* Revocation warning: buyer revoked on AON to block the executor */}
-                      {revocationDetected && (
-                        <div className="card-inner" style={{ borderColor: "rgba(192,57,43,0.25)" }}>
-                          <div className="danger" style={{ fontWeight: 500, marginBottom: 6 }}>
-                            ⚠ Buyer revoked authorization on AON
-                          </div>
-                          <div className="muted" style={{ fontSize: 13, lineHeight: 1.6 }}>
-                            The executor will not auto-settle a revoked authorization.
-                            If you have already sent CSD, submit your txid below and click
-                            "Settle directly". This calls the contract from your wallet,
-                            bypassing the executor. The contract only checks the CSD payment,
-                            not AON revocations.
-                          </div>
-                        </div>
-                      )}
+          {isConnected ? (
+            <button className={`btn-lg ${side === "buy" ? "btn-buy" : "btn-sell"}`} onClick={submitOrder}
+              disabled={!!loading || !preview || !!blocking || isWrongChain}>
+              {loading ?? (isWrongChain ? "Switch to Ethereum to trade" : wrapNeeded > 0n ? `Wrap and sell ${B}` : `Sign and ${side} ${B}`)}
+            </button>
+          ) : (
+            <button className="btn btn-lg" onClick={() => connect({ connector: injected() })}>Connect wallet to trade</button>
+          )}
+          <p className="faint" style={{ lineHeight: 1.5 }}>
+            {wrapNeeded > 0n
+              ? "Wrapping is one transaction and costs a little gas. Signing the order is free, and nothing leaves your wallet until the trade settles."
+              : "Signing is free. Nothing leaves your wallet until the trade settles on Ethereum."}
+          </p>
+        </section>
 
-                      <div className="card-inner">
-                        <div className="faint" style={{ marginBottom: 8 }}>Send CSD to buyer</div>
-                        <div className="muted" style={{ fontSize: 13 }}>Address:</div>
-                        <div className="mono" style={{ marginTop: 4 }}>
-                          0x{matchedAuth.payload.authorization.sellerCsdScriptHash.slice(2, 42)}
-                        </div>
-                        <div className="muted" style={{ marginTop: 10, fontSize: 13 }}>Amount:</div>
-                        <div style={{ marginTop: 4, fontSize: 17 }}>
-                          {formatCsd(matchedAuth.payload.authorization.csdAmount)} CSD
-                        </div>
-                      </div>
-
-                      <div>
-                        <label>CSD transaction ID</label>
-                        <input
-                          value={csdTxid}
-                          onChange={e => {
-                            setCsdTxid(e.target.value);
-                            setConfirmationCount(0);
-                            pollingRef.current = false;
-                          }}
-                          onBlur={e => { if (e.target.value.length > 10) pollConfirmations(e.target.value); }}
-                          placeholder="0x..."
-                        />
-                      </div>
-
-                      {/* Confirmation progress */}
-                      {csdTxid.length > 10 && (() => {
-                        const required = Number(matchedAuth?.payload?.authorization?.minConfirmations ?? 1);
-                        const ready = confirmationCount >= required;
-                        return (
-                          <div style={{ fontSize: 13, color: ready ? "var(--green)" : "var(--muted)" }}>
-                            {checkingConfs && !ready
-                              ? `Checking confirmations...`
-                              : ready
-                                ? `✓ ${confirmationCount}/${required} confirmations`
-                                : confirmationCount > 0
-                                  ? `${confirmationCount}/${required} confirmations — waiting for ${required - confirmationCount} more block${required - confirmationCount !== 1 ? "s" : ""}...`
-                                  : `${required} confirmation${required !== 1 ? "s" : ""} required (~${required * 2} min)`
-                            }
-                          </div>
-                        );
-                      })()}
-
-                      {revocationDetected ? (
-                        <button
-                          className="btn-danger"
-                          style={{ fontWeight: 600 }}
-                          onClick={settleDirectly}
-                          disabled={!csdTxid || !!loading || confirmationCount < Number(matchedAuth?.payload?.authorization?.minConfirmations ?? 1)}
-                        >
-                          {loading ?? "Settle directly (bypass executor)"}
-                        </button>
-                      ) : (
-                        <button
-                          className="btn"
-                          onClick={submitCsdProof}
-                          disabled={!csdTxid || !!loading || confirmationCount < Number(matchedAuth?.payload?.authorization?.minConfirmations ?? 1)}
-                        >
-                          {loading ?? "Verify payment + settle"}
-                        </button>
-                      )}
-                      <div className="muted" style={{ fontSize: 13 }}>
-                        Wait until the CSD transaction is mined before submitting.
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
+        {/* Recent trades */}
+        <section className="card trades-card" aria-label="Recent trades" style={{ padding: "18px 14px" }}>
+          <h2 className="panel-title" style={{ fontFamily: "var(--sans)", margin: "0 6px 12px" }}>Recent trades</h2>
+          <div className="book-head">
+            <span>Price</span><span>Size</span><span>Time</span>
+          </div>
+          {marketFills.length === 0 ? (
+            <div className="book-empty">No trades in {market.label} yet.</div>
+          ) : (
+            <div className="col" style={{ gap: 0, marginTop: 6 }}>
+              {marketFills.slice(0, 18).map(f => (
+                <a key={f.fillHash} className="trade-row" href={f.executionTx ? etherscanTx(f.executionTx) : `${EXPLORER}?hash=${f.fillHash}`} target="_blank" rel="noreferrer"
+                  title={f.status === "settled" ? "View settlement" : "Settling on Ethereum"}>
+                  <span className={f.takerSide}>{fmtPrice(market, f.price)}</span>
+                  <span>{fmtBase(market, f.baseAmount)}</span>
+                  <span className="muted">{f.status === "pending" ? "Settling" : new Date(f.settledAt ?? f.createdAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
+                </a>
+              ))}
             </div>
           )}
-
-        </div>
+        </section>
       </div>
 
-      {/* Balances */}
+      {/* Your activity */}
       {isConnected && (
-        <div className="balance-grid">
-          <div className="card">
-            <div className="faint">Ethereum wallet</div>
-            <div style={{ marginTop: 14 }}>
-              <div className="muted" style={{ fontSize: 13 }}>USDC</div>
-              <div style={{ fontSize: 24, marginTop: 4 }}>{formatUsdc(usdcBalance)}</div>
+        <section className="card" style={{ marginTop: 16 }} aria-label="Your orders and trades">
+          <div className="row-between" style={{ flexWrap: "wrap", marginBottom: 6 }}>
+            <div className="tabs-underline" role="tablist">
+              <button role="tab" aria-selected={activityTab === "open"} className={activityTab === "open" ? "on" : ""} onClick={() => setActivityTab("open")}>Open orders ({myOpen.length})</button>
+              <button role="tab" aria-selected={activityTab === "trades"} className={activityTab === "trades" ? "on" : ""} onClick={() => setActivityTab("trades")}>Trade history</button>
             </div>
+            <span className="muted" style={{ fontSize: 14 }}>
+              In your wallet: {isEthMarket
+                ? <>{fmt(nativeBalance + baseBalance, 18, 5)} ETH{baseBalance > 0n && ` (${fmt(baseBalance, 18, 5)} as WETH)`}</>
+                : <>{fmtBase(market, baseBalance)} {B}</>} and {fmtQuote(market, quoteBalance)} {Q}
+              {isEthMarket && baseAvail > 0n && !DEMO_MODE && (
+                <button className="link-btn" style={{ marginLeft: 14 }} onClick={() => unwrapWeth(baseAvail)} disabled={!!loading}
+                  title="WETH that isn't backing an open order can be turned back into ETH">
+                  Convert {fmt(baseAvail, 18, 5)} WETH to ETH
+                </button>
+              )}
+            </span>
           </div>
-          {csdReceiveAddr && (
-            <div className="card">
-              <div className="faint">Compute Substrate wallet</div>
-              <div style={{ marginTop: 14 }}>
-                <div className="muted" style={{ fontSize: 13 }}>CSD</div>
-                <div style={{ fontSize: 24, marginTop: 4 }}>{formatCsd(csdBalance)}</div>
+
+          <div style={{ marginTop: 14 }}>
+          {activityTab === "open" ? (
+            myOpen.length === 0 ? <p className="muted" style={{ fontSize: 15 }}>No open orders. When a limit order doesn't fill right away, it waits here until it fills, expires or you cancel it.</p> : (
+              <div style={{ overflowX: "auto" }}>
+                <table className="tbl">
+                  <thead><tr><th>Market</th><th>Side</th><th>Price</th><th>Amount</th><th>Filled</th><th>Expires in</th><th></th></tr></thead>
+                  <tbody>
+                    {myOpen.map(o => (
+                      <tr key={o.orderObj.objectHash}>
+                        <td>{o.market.label}</td>
+                        <td className={o.side}>{o.side === "buy" ? "Buy" : "Sell"}</td>
+                        <td>{fmtPrice(o.market, o.price)}</td>
+                        <td>{fmtBase(o.market, o.baseAmount)}</td>
+                        <td>
+                          {Number((o.filled * 1000n) / o.baseAmount) / 10}%
+                          {o.pending > 0n && <span className="muted"> and {fmtBase(o.market, o.pending)} settling</span>}
+                          {!o.funded && <span className="tag tag-warn" style={{ marginLeft: 8 }} title="Your wallet doesn't currently cover this order, so it's hidden from the book.">Needs funds</span>}
+                        </td>
+                        <td className="muted">{formatCountdown(Math.max(0, o.validBefore - nowSecs))}</td>
+                        <td style={{ textAlign: "right" }}>
+                          <div className="row" style={{ justifyContent: "flex-end", gap: 14 }}>
+                            <button className="link-btn muted" onClick={() => cancelOrder(o, true)} disabled={!!loading}
+                              title="Also revokes the order in the settlement contract, so nobody can settle it. Costs gas.">
+                              Cancel on-chain
+                            </button>
+                            <button className="btn-secondary" style={{ fontSize: 14, padding: "6px 14px" }} onClick={() => cancelOrder(o)} disabled={!!loading}
+                              title="Free. Every executor and interface stops matching this order.">
+                              Cancel
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-            </div>
+            )
+          ) : (
+            myFills.length === 0 ? <p className="muted" style={{ fontSize: 15 }}>No trades yet. Your fills appear here with their settlement progress.</p> : (
+              <div style={{ overflowX: "auto" }}>
+                <table className="tbl">
+                  <thead><tr><th>Time</th><th>Market</th><th>Side</th><th>Price</th><th>Amount</th><th>Total</th><th>Settlement</th></tr></thead>
+                  <tbody>
+                    {myFills.map(f => {
+                      const iTook = f.taker.toLowerCase() === me;
+                      const bought = iTook ? f.takerSide === "buy" : f.takerSide === "sell";
+                      return (
+                        <tr key={f.fillHash}>
+                          <td className="muted">{new Date(f.settledAt ?? f.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</td>
+                          <td>{f.market.label}</td>
+                          <td className={bought ? "buy" : "sell"}>{bought ? "Buy" : "Sell"}</td>
+                          <td>{fmtPrice(f.market, f.price)}</td>
+                          <td>{fmtBase(f.market, f.baseAmount)}</td>
+                          <td>{fmtQuote(f.market, f.quoteAmount)}</td>
+                          <td>
+                            <a href={f.executionTx ? etherscanTx(f.executionTx) : `${EXPLORER}?hash=${f.fillHash}`} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}
+                              title={f.executionTx ? "View the settlement transaction" : "View on AON"}>
+                              {timeline(f)}
+                            </a>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )
           )}
-        </div>
+          </div>
+
+        </section>
       )}
 
-
-      {/* ── Price chart ─────────────────────────────────────────────────────── */}
-      {completedTrades.length > 1 && (() => {
-        const chartData = [...completedTrades]
-          .reverse()
-          .map((t, i) => ({
-            i,
-            price: Math.round(t.pricePerCsd * 10000) / 10000,
-            label: new Date(t.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
-          }));
-        const prices = chartData.map(d => d.price);
+      {/* Price chart */}
+      {settledTrades.length > 1 && (() => {
+        const data = [...settledTrades].reverse().map((t, i) => ({
+          i, price: priceNumber(market, t.price),
+          ts: t.settledAt ?? t.createdAt,
+        })).map((d, _i, all) => ({
+          ...d,
+          label: all[all.length - 1].ts - all[0].ts < 36 * 3600e3
+            ? new Date(d.ts).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+            : new Date(d.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+        }));
+        const prices = data.map(d => d.price);
         const minP = Math.min(...prices), maxP = Math.max(...prices);
-        const pad = (maxP - minP) * 0.15 || 0.01;
+        const pad = (maxP - minP) * 0.15 || maxP * 0.01 || 0.01;
         return (
-          <div className="card" style={{ marginTop: 18 }}>
-            <div className="row-between" style={{ marginBottom: 16 }}>
-              <div>
-                <div className="faint">CSD / USDC price</div>
-                <div style={{ fontSize: 20, marginTop: 4 }}>
-                  {chartData[chartData.length - 1]?.price.toLocaleString(undefined, { maximumFractionDigits: 4 })}
-                  <span className="muted" style={{ fontSize: 14, marginLeft: 8 }}>USDC / CSD</span>
-                </div>
-              </div>
-              <div className="col" style={{ alignItems: "flex-end", gap: 4 }}>
-                <div className="muted" style={{ fontSize: 12 }}>{completedTrades.length} trade{completedTrades.length !== 1 ? "s" : ""}</div>
-                <div className="muted" style={{ fontSize: 12 }}>
-                  {minP.toFixed(4)} – {maxP.toFixed(4)}
-                </div>
-              </div>
-            </div>
-            <ResponsiveContainer width="100%" height={160}>
-              <LineChart data={chartData} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
-                <XAxis dataKey="label" tick={{ fill: "var(--faint)", fontSize: 11,  }} axisLine={false} tickLine={false} />
-                <YAxis domain={[minP - pad, maxP + pad]} tick={{ fill: "var(--faint)", fontSize: 11,  }} axisLine={false} tickLine={false} tickFormatter={v => v.toFixed(3)} />
-                <Tooltip
-                  contentStyle={{ background: "var(--bg)", border: "1px solid var(--border2)", borderRadius: 4, fontSize: 13 }}
-                  labelStyle={{ color: "var(--muted)",  }}
-                  formatter={(v: any) => [`${Number(v).toFixed(4)} USDC/CSD`, "Price"]}
-                />
-                <Line type="monotone" dataKey="price" stroke="var(--green)" strokeWidth={2} dot={{ fill: "var(--green)", r: 3 }} activeDot={{ r: 5 }} />
+          <section className="card" style={{ marginTop: 16 }} aria-label="Price history">
+            <h2 className="panel-title" style={{ fontFamily: "var(--sans)", marginBottom: 14 }}>{market.label} price history</h2>
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={data} margin={{ top: 4, right: 8, left: -6, bottom: 0 }}>
+                <XAxis dataKey="label" tick={{ fill: "var(--faint)", fontSize: 12 }} axisLine={false} tickLine={false} minTickGap={24} />
+                <YAxis domain={[minP - pad, maxP + pad]} tick={{ fill: "var(--faint)", fontSize: 12 }} axisLine={false} tickLine={false} width={64}
+                  tickFormatter={v => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })} />
+                <Tooltip contentStyle={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 8, fontSize: 13, fontFamily: "var(--sans)" }}
+                  formatter={(v: any) => [`${Number(v).toLocaleString(undefined, { maximumFractionDigits: 4 })} ${Q}`, "Price"]} />
+                <Line type="stepAfter" dataKey="price" stroke="var(--blue)" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>
-          </div>
+          </section>
         );
       })()}
 
-      {/* ── Completed trades ─────────────────────────────────────────────────── */}
-      {completedTrades.length > 0 && (
-        <div className="card" style={{ marginTop: 18 }}>
-          <div className="faint" style={{ marginBottom: 14 }}>Completed trades</div>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                  {["Time", "CSD", "USDC", "Price", "Buyer", "Tx"].map(h => (
-                    <th key={h} style={{ textAlign: "left", padding: "0 12px 10px 0", color: "var(--muted)", fontWeight: 400, fontSize: 12, textTransform: "uppercase", letterSpacing: "0.06em" }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {completedTrades.map(t => (
-                  <tr key={t.receiptHash} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-                    <td style={{ padding: "10px 12px 10px 0", color: "var(--muted)" }}>
-                      {new Date(t.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                    </td>
-                    <td style={{ padding: "10px 12px 10px 0" }}>{formatCsd(t.csdAmount)}</td>
-                    <td style={{ padding: "10px 12px 10px 0" }}>{formatUsdc(t.usdcAmount)}</td>
-                    <td style={{ padding: "10px 12px 10px 0", color: "var(--green)" }}>
-                      {t.pricePerCsd.toLocaleString(undefined, { maximumFractionDigits: 4 })}
-                    </td>
-                    <td style={{ padding: "10px 12px 10px 0", fontFamily: "var(--mono)", color: "var(--muted)" }}>
-                      {short(t.buyer)}
-                    </td>
-                    <td style={{ padding: "10px 12px 10px 0" }}>
-                      {t.executionTx ? (
-                        <a href={`https://etherscan.io/tx/${t.executionTx}`} target="_blank" rel="noreferrer"
-                          style={{ color: "var(--muted)", fontSize: 12 }}>
-                          {shortHash(t.executionTx, 4)} ↗
-                        </a>
-                      ) : (
-                        <a href={`https://explorer.aon.network?hash=${t.receiptHash}`} target="_blank" rel="noreferrer"
-                          style={{ color: "var(--muted)", fontSize: 12 }}>
-                          AON ↗
-                        </a>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Live log */}
       {logs.length > 0 && (
-        <div className="card" style={{ marginTop: 18 }}>
-          <div className="faint" style={{ marginBottom: 12 }}>Live log</div>
-          <div className="col" style={{ gap: 6 }}>
+        <details className="card" style={{ marginTop: 16 }}>
+          <summary className="panel-title" style={{ cursor: "pointer" }}>Activity log ({logs.length})</summary>
+          <div className="col" style={{ gap: 6, marginTop: 12 }}>
             {logs.map((l, i) => (
-              <div key={i} className="muted" style={{ fontSize: 13 }}>
-                {new Date(l.ts).toLocaleTimeString()} {l.text}
-              </div>
+              <div key={i} className="muted" style={{ fontSize: 13 }}>{new Date(l.ts).toLocaleTimeString()} {l.text}</div>
             ))}
           </div>
-        </div>
+        </details>
       )}
-
-      <footer style={{ marginTop: 64, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
-        <div className="muted" style={{ fontSize: 13 }}>
-          Covenant · Powered by{" "}
-          <a href="https://aon.network" target="_blank" rel="noreferrer">AON</a>
-          {" "}and{" "}
-          <a href="https://computesubstrate.org" target="_blank" rel="noreferrer">Compute Substrate</a>
-          {" · "}
-          <a href="/about">How it works</a>
-          {" · "}No custody. No authority.
-        </div>
-      </footer>
-
     </main>
   );
 }

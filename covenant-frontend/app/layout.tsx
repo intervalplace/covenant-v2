@@ -1,49 +1,35 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Providers } from "@/providers";
+import { SiteNav } from "@/nav";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Covenant",
-  description: "Execution no longer requires trust.",
+  // Absolute URLs for the social preview image; set to the deployed origin.
+  metadataBase: process.env.NEXT_PUBLIC_SITE_URL ? new URL(process.env.NEXT_PUBLIC_SITE_URL) : undefined,
+  title: "Covenant Markets — an order book without the exchange",
+  description: "An order book without the exchange. Trade ETH, LINK and QNT for USDT from your own wallet; nothing moves until your terms are met on Ethereum.",
+  openGraph: { title: "Covenant Markets", description: "An order book without the exchange.", siteName: "Covenant Markets" },
+  twitter: { card: "summary_large_image", title: "Covenant Markets", description: "An order book without the exchange." },
 };
-
-function Nav() {
-  return (
-    <nav style={{
-      borderBottom: "1px solid var(--border)",
-      padding: "0 32px",
-      height: 48,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      position: "sticky",
-      top: 0,
-      background: "var(--bg)",
-      zIndex: 100,
-    }}>
-      <Link href="/" style={{
-        fontSize: 16,
-        letterSpacing: "0.01em",
-        color: "var(--fg)",
-      }}>
-        Covenant
-      </Link>
-      <div style={{ display: "flex", gap: 28, fontSize: 14, color: "var(--muted)" }}>
-        <Link href="/">Market</Link>
-        <Link href="/about">About</Link>
-        <Link href="/docs">Docs</Link>
-      </div>
-    </nav>
-  );
-}
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <body>
-        <Nav />
-        <Providers>{children}</Providers>
+        <Providers>
+          <SiteNav />
+          {children}
+          <div style={{ maxWidth: 1240, margin: "0 auto", padding: "0 24px 40px" }}>
+            <footer className="site-footer">
+              <span>Covenant runs on <a href="https://aon.network" target="_blank" rel="noreferrer">AON</a> and settles on Ethereum.</span>
+              <span className="spacer" />
+              <Link href="/about">How it works</Link>
+              <Link href="/docs">Docs</Link>
+              <a href="https://explorer.aon.network" target="_blank" rel="noreferrer">AON Explorer</a>
+            </footer>
+          </div>
+        </Providers>
       </body>
     </html>
   );

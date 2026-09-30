@@ -70,6 +70,24 @@ export default function Docs() {
 
       {hr}
 
+      <h2>Market price and warnings</h2>
+      <p className="muted" style={{ marginTop: 12 }}>
+        The market price shown next to each book comes from Chainlink's price
+        feeds, read directly from Ethereum through the Chainlink Feed Registry
+        and converted from USD to USDT with Chainlink's USDT/USD feed. It is a
+        reference only; Covenant trades at whatever prices traders sign.
+      </p>
+      <p className="muted" style={{ marginTop: 12 }}>
+        The order form compares your order to it. Anything that fills now is
+        judged by its average price, and anything left waiting in the book by
+        its limit price, since anyone can take it at that price. From 2% worse
+        than market you see a note; from 10% you must confirm before signing.
+        If a feed is missing or more than 26 hours old, there is no reference
+        and no warning.
+      </p>
+
+      {hr}
+
       <h2>Roles</h2>
       <h3 style={{ marginTop: 24 }}>Trader</h3>
       <p className="muted">Signs bounded orders. Tokens stay in the trader's wallet until settlement.</p>

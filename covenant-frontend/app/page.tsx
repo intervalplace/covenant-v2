@@ -1,6 +1,6 @@
 "use client";
 
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
+import { ComposedChart, Line, Scatter, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   useAccount, useConnect, useDisconnect, useBalance,
@@ -26,6 +26,7 @@ import { erc20Abi, wethAbi, evmSpotSettlementAbi } from "@/abi";
 import type { AonObject, RestingOrder, FillView, Log, Side } from "@/types";
 import { finalizeObject } from "@intervalplace/aon-sdk";
 import { Arc } from "@/arc";
+import { getReference, deviation, type Reference } from "@/reference";
 
 const finalize = (o: any) => finalizeObject(o as any) as any as AonObject;
 const EXPLORER = "https://explorer.aon.network";
@@ -64,6 +65,22 @@ export default function Home() {
   const [priceHuman,  setPriceHuman]  = useState("");
   const [amountHuman, setAmountHuman] = useState("");
   const [activityTab, setActivityTab] = useState<"open" | "trades">("open");
+
+  // Chainlink reference price for the active market
+  const [reference, setReference] = useState<Reference | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setReference(null);
+    if (!publicClient) return;
+    const load = () => getReference(publicClient as any, market).then(r => { if (alive) setReference(r); }).catch(() => {});
+    load();
+    const id = setInterval(load, 60_000);
+    return () => { alive = false; clearInterval(id); };
+  }, [market.key, publicClient]);
+  const refPrice = reference && !reference.stale ? reference.price : null;
+
+  // Confirmation for orders far from the market price
+  const [offMarketOk, setOffMarketOk] = useState(false);
 
   // Active traders can keep WETH to avoid re-wrapping on every sell
   const [preferWeth, setPreferWeth] = useState(false);
@@ -260,7 +277,36 @@ export default function Home() {
     if (isConnected && payAvail < preview.need) return `Not enough ${payToken.symbol}. Available: ${fmt(payAvail, payToken.decimals)}.`;
     return null;
   })();
-  const blocking = problem && !problem.startsWith("Only ");
+  // How far this order's price is from the market, in the direction that costs you.
+  // What counts: the average price of what fills now, and — for a limit order —
+  // the limit price of any part left waiting in the book, since anyone can
+  // trade against that at exactly that price.
+  const offMarket = (() => {
+    if (!preview || refPrice === null || preview.selfCross) return null;
+    const ref = refPrice.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    const worse = (px: number) => (side === "buy" ? 1 : -1) * deviation(px, refPrice); // + = worse than market
+    const fmtPct = (d: number) => (d * 100).toFixed(d < 0.1 ? 1 : 0);
+    const dir = side === "buy" ? "above" : "below";
+
+    const rests = orderType === "limit" && preview.remainder > 0n && limit;
+    const dRest = rests ? worse(priceNumber(market, limit!)) : -1;
+    const dFill = preview.filled > 0n && preview.avgPrice ? worse(priceNumber(market, preview.avgPrice)) : -1;
+
+    let text: string | null = null, d = -1;
+    if (dRest >= 0.02 && dRest >= dFill) {
+      d = dRest;
+      text = preview.filled > 0n
+        ? `The part that doesn't fill right away would wait in the book at ${fmtPct(d)}% ${dir} the market price of ${ref} ${Q}, where anyone can take it.`
+        : `Your price is ${fmtPct(d)}% ${dir} the market price of ${ref} ${Q}. Anyone can take this order at that price.`;
+    } else if (dFill >= 0.02) {
+      d = dFill;
+      text = `This fills at an average ${fmtPct(d)}% ${dir} the market price of ${ref} ${Q}. The book is thin at these prices.`;
+    }
+    return text ? { text, severe: d >= 0.10 } : null;
+  })();
+  useEffect(() => { setOffMarketOk(false); }, [priceHuman, amountHuman, side, orderType, marketKey]);
+
+  const blocking = (problem && !problem.startsWith("Only ")) || (offMarket?.severe && !offMarketOk);
 
   function setPct(pct: bigint) {
     if (side === "sell") { setAmountHuman(formatUnits(sellAvail * pct / 100n, market.base.decimals)); return; }
@@ -472,7 +518,7 @@ export default function Home() {
         ? `I will buy up to ${amt} at no more than ${px} each, spending at most ${fmtQuote(market, preview.cost)} ${Q}.`
         : `I will sell up to ${amt} at no less than ${px} each, receiving at least ${fmtQuote(market, preview.cost)} ${Q}.`);
       if (preview.filled > 0n)
-        sentences.push(`${fmtBase(market, preview.filled)} ${B} fills right away at an average of ${fmtPrice(market, preview.avgPrice!)} ${Q}.`);
+        sentences.push(`${fmtBase(market, preview.filled)} ${B} fills right away at an average of ${fmt(preview.avgPrice!, market.quote.decimals + 18 - market.base.decimals, 2)} ${Q}.`);
       if (preview.remainder > 0n)
         sentences.push(`${preview.filled > 0n ? "The rest" : "The order"} waits in the book until ${expiry}, or until I cancel it.`);
     } else {
@@ -533,7 +579,7 @@ export default function Home() {
               <button className="link-btn muted" onClick={hideGuide}>Hide</button>
             </div>
             <ol>
-              <li><div><strong>Connect a wallet</strong><span>Any Ethereum wallet. Covenant never takes custody.</span></div></li>
+              <li><div><strong>Connect a wallet</strong><span>Any Ethereum wallet. Your funds stay in it.</span></div></li>
               <li><div><strong>Sign your order</strong><span>Free, no gas. Your tokens stay in your wallet while it waits.</span></div></li>
               <li><div><strong>It settles on Ethereum</strong><span>Both sides swap in one transaction, or nothing moves.</span></div></li>
             </ol>
@@ -577,7 +623,11 @@ export default function Home() {
           ))}
         </div>
         <div className="market-stats">
-          <div><div className="stat-label">Last price</div><div className="stat">{lastPrice !== undefined ? fmtPrice(market, lastPrice) : "—"}</div></div>
+          <div title={reference ? `Chainlink ${B}/USD${reference.quoteIsUsd ? "" : `, converted to ${Q}`}. Updated ${new Date(reference.updatedAt).toLocaleTimeString()}.` : `No Chainlink feed for ${B}`}>
+            <div className="stat-label">Market price</div>
+            <div className="stat">{refPrice !== null ? refPrice.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"}</div>
+          </div>
+          <div><div className="stat-label">Last trade</div><div className="stat">{lastPrice !== undefined ? fmtPrice(market, lastPrice) : "—"}</div></div>
           <div><div className="stat-label">Best bid</div><div className="stat buy">{bids[0] ? fmtPrice(market, bids[0].price) : "—"}</div></div>
           <div><div className="stat-label">Best ask</div><div className="stat sell">{asks[0] ? fmtPrice(market, asks[0].price) : "—"}</div></div>
           <div><div className="stat-label">Trades</div><div className="stat">{settledTrades.length}</div></div>
@@ -700,7 +750,18 @@ export default function Home() {
             )}
           </div>
 
-          {problem && <div className={`form-problem ${blocking ? "danger" : "warn"}`} role="alert">{problem}</div>}
+          {problem && <div className={`form-problem ${problem.startsWith("Only ") ? "warn" : "danger"}`} role="alert">{problem}</div>}
+          {offMarket && !problem && (
+            <div className={`market-warn ${offMarket.severe ? "severe" : ""}`} role="alert">
+              <span>{offMarket.text}</span>
+              {offMarket.severe && (
+                <label className="check" style={{ marginTop: 8 }}>
+                  <input type="checkbox" checked={offMarketOk} onChange={e => setOffMarketOk(e.target.checked)} />
+                  <span>I understand, place it anyway</span>
+                </label>
+              )}
+            </div>
+          )}
 
           {isConnected ? (
             <button className={`btn-lg ${side === "buy" ? "btn-buy" : "btn-sell"}`} onClick={submitOrder}
@@ -834,33 +895,53 @@ export default function Home() {
         </section>
       )}
 
-      {/* Price chart */}
-      {settledTrades.length > 1 && (() => {
-        const data = [...settledTrades].reverse().map((t, i) => ({
-          i, price: priceNumber(market, t.price),
-          ts: t.settledAt ?? t.createdAt,
-        })).map((d, _i, all) => ({
-          ...d,
-          label: all[all.length - 1].ts - all[0].ts < 36 * 3600e3
-            ? new Date(d.ts).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
-            : new Date(d.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
-        }));
-        const prices = data.map(d => d.price);
-        const minP = Math.min(...prices), maxP = Math.max(...prices);
-        const pad = (maxP - minP) * 0.15 || maxP * 0.01 || 0.01;
+      {/* Price chart: Chainlink market price with Covenant's own trades on top */}
+      {(() => {
+        const since = Date.now() - 24 * 3600e3;
+        const refData = refPrice !== null ? (reference?.history ?? []) : [];
+        const trades = settledTrades
+          .filter(t => (t.settledAt ?? t.createdAt) >= since)
+          .map(t => ({ t: t.settledAt ?? t.createdAt, price: priceNumber(market, t.price), side: t.takerSide }));
+        if (refData.length < 2 && trades.length === 0) return null;
+        const all = [...refData.map(d => d.price), ...trades.map(d => d.price)];
+        const minP = Math.min(...all), maxP = Math.max(...all);
+        const pad = (maxP - minP) * 0.12 || maxP * 0.005 || 0.01;
+        const tMin = Math.min(since, ...trades.map(d => d.t)), tMax = Date.now();
+        const hhmm = (v: number) => new Date(v).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+        // Rounded price ticks (steps of 1, 2, 2.5 or 5 × 10^n) and a time tick every 4 hours
+        const lo = minP - pad, hi = maxP + pad, raw = (hi - lo) / 4, mag = 10 ** Math.floor(Math.log10(raw));
+        const step = [1, 2, 2.5, 5, 10].map(k => k * mag).find(v => v >= raw) ?? 10 * mag;
+        const yTicks: number[] = []; for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) yTicks.push(+v.toFixed(8));
+        const H4 = 4 * 3600e3, xTicks: number[] = []; for (let v = Math.ceil(tMin / H4) * H4; v <= tMax; v += H4) xTicks.push(v);
         return (
-          <section className="card" style={{ marginTop: 16 }} aria-label="Price history">
-            <h2 className="panel-title" style={{ fontFamily: "var(--sans)", marginBottom: 14 }}>{market.label} price history</h2>
-            <ResponsiveContainer width="100%" height={200}>
-              <LineChart data={data} margin={{ top: 4, right: 8, left: -6, bottom: 0 }}>
-                <XAxis dataKey="label" tick={{ fill: "var(--faint)", fontSize: 12 }} axisLine={false} tickLine={false} minTickGap={24} />
-                <YAxis domain={[minP - pad, maxP + pad]} tick={{ fill: "var(--faint)", fontSize: 12 }} axisLine={false} tickLine={false} width={64}
+          <section className="card" style={{ marginTop: 16 }} aria-label="Price, last 24 hours">
+            <div className="row-between" style={{ marginBottom: 14, flexWrap: "wrap" }}>
+              <h2 className="panel-title" style={{ fontFamily: "var(--sans)" }}>{market.label} price, last 24 hours</h2>
+              <div className="chart-legend">
+                {refData.length > 1 && <span><i className="lg-line" />Market price (Chainlink)</span>}
+                <span><i className="lg-dot buy" /><i className="lg-dot sell" />Covenant trades</span>
+              </div>
+            </div>
+            <ResponsiveContainer width="100%" height={220}>
+              <ComposedChart margin={{ top: 6, right: 8, left: -6, bottom: 0 }}>
+                <XAxis dataKey="t" type="number" scale="time" domain={[tMin, tMax]} ticks={xTicks} tickFormatter={hhmm}
+                  tick={{ fill: "var(--faint)", fontSize: 12 }} axisLine={false} tickLine={false} minTickGap={40} />
+                <YAxis dataKey="price" type="number" domain={[lo, hi]} ticks={yTicks} width={70}
+                  tick={{ fill: "var(--faint)", fontSize: 12 }} axisLine={false} tickLine={false}
                   tickFormatter={v => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })} />
-                <Tooltip contentStyle={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 8, fontSize: 13, fontFamily: "var(--sans)" }}
-                  formatter={(v: any) => [`${Number(v).toLocaleString(undefined, { maximumFractionDigits: 4 })} ${Q}`, "Price"]} />
-                <Line type="stepAfter" dataKey="price" stroke="var(--blue)" strokeWidth={2} dot={false} />
-              </LineChart>
+                <Tooltip cursor={{ stroke: "var(--line-strong)" }}
+                  contentStyle={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 8, fontSize: 13, fontFamily: "var(--sans)" }}
+                  labelFormatter={(v: any) => new Date(v).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                  formatter={(v: any, name: any) => [`${Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${Q}`, name]} />
+                {refData.length > 1 && (
+                  <Line data={refData} dataKey="price" name="Market price" type="stepAfter" stroke="#8A93A3" strokeWidth={1.5}
+                    strokeDasharray="4 3" dot={false} isAnimationActive={false} />
+                )}
+                <Scatter data={trades.filter(d => d.side === "buy")} dataKey="price" name="Trade (buy)" fill="var(--buy)" isAnimationActive={false} />
+                <Scatter data={trades.filter(d => d.side === "sell")} dataKey="price" name="Trade (sell)" fill="var(--sell)" isAnimationActive={false} />
+              </ComposedChart>
             </ResponsiveContainer>
+            {trades.length === 0 && <p className="faint" style={{ marginTop: 8 }}>No Covenant trades in the last 24 hours yet.</p>}
           </section>
         );
       })()}

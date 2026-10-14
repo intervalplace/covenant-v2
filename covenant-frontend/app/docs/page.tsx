@@ -12,6 +12,11 @@ export default function Docs() {
       <p className="prose-kicker" style={{ marginBottom: 12 }}>Docs</p>
       <h1 style={{ fontWeight: 600, lineHeight: 1.15, marginBottom: 14 }}>Covenant Documentation</h1>
       <p className="muted">Covenant separates permission from custody.</p>
+      <p className="muted" style={{ marginTop: 12 }}>
+        Covenant is one example interface on AON. Everything below (the order
+        format, the matching rules, the settlement contract) is open, so other
+        interfaces can trade in the same book.
+      </p>
 
       {hr}
 
@@ -26,9 +31,10 @@ export default function Docs() {
 
       <h2>Markets</h2>
       <p className="muted" style={{ marginTop: 12 }}>
-        ETH/USDT, LINK/USDT and QNT/USDT on Ethereum mainnet. Token addresses are
+        ETH/USDT on Ethereum mainnet, with more pairs to follow. Token addresses are
         fixed in the interface. On ETH/USDT, buy orders are paid out in native
-        ETH: the contract unwraps WETH during settlement. Sellers need WETH,
+        ETH: the contract unwraps WETH during settlement. Orders must be worth
+        at least 25 USDT, so settlement gas stays a small part of each trade. Sellers need WETH,
         because a signed order can't pull native ETH from a wallet, so the
         interface wraps it as a step before signing. All markets run on the
         generic {code("aon:evm-spot")} namespace and settle through one
@@ -70,6 +76,28 @@ export default function Docs() {
 
       {hr}
 
+      <h2>Front-running protection</h2>
+      <p className="muted" style={{ marginTop: 12 }}>
+        Orders are public on AON before they settle. Without protection, someone
+        could see a buy with a 3,015 limit, place their own sell at 3,015 and
+        settle against it first, so the buyer pays 3,015 instead of the 3,005 in
+        the book.
+      </p>
+      <p className="muted" style={{ marginTop: 12 }}>
+        So an order that fills right away names, in its signed terms, the exact
+        resting orders it matched and exactly how much it takes from each.
+        Until that part has filled, the settlement contract only lets it trade
+        with those orders, never more than the named amount from each and always
+        at exactly its price, and nobody else can trade with your order at all.
+        If a matched order has a little less left by the time your trade
+        settles, you get what's left of it. Whatever of that part hasn't filled
+        within five minutes (for example because someone took a matched order
+        first) is simply void: it never opens up at your limit. Whatever else
+        you ordered rests in the book as usual.
+      </p>
+
+      {hr}
+
       <h2>Market price and warnings</h2>
       <p className="muted" style={{ marginTop: 12 }}>
         The market price shown next to each book comes from Chainlink's price
@@ -88,14 +116,31 @@ export default function Docs() {
 
       {hr}
 
+      <h2>Connections</h2>
+      <p className="muted" style={{ marginTop: 12 }}>
+        Once your wallet is connected to Ethereum, Covenant reads the chain
+        through your wallet's own connection, so it needs no RPC of its own.
+        The order book comes from AON nodes, tried in order. You can set your own
+        RPC and AON node under Network live → Connections.
+      </p>
+
+      {hr}
+
       <h2>Roles</h2>
       <h3 style={{ marginTop: 24 }}>Trader</h3>
       <p className="muted">Signs bounded orders. Tokens stay in the trader's wallet until settlement.</p>
       <h3 style={{ marginTop: 24 }}>Executor</h3>
       <p className="muted">
         Watches AON for executable fills and submits them to the settlement
-        contract. Permissionless: anyone can run one. The buyer can pay a small
-        per-fill fee to the executor, capped by the fee budget in their authorization.
+        contract. Permissionless: anyone can run one. The buyer can pay the
+        executor a small fee, a percentage of each fill. The contract caps it in
+        proportion to the fill's size, so a tiny fill can only carry a tiny fee.
+      </p>
+      <p className="muted" style={{ marginTop: 12 }}>
+        No executor is required. Any trader can settle their own matched trade
+        straight away with "Settle now": the interface builds the same
+        transaction an executor would and sends it from your wallet. You pay the
+        gas, and any executor fee in the trade goes to you.
       </p>
       <h3 style={{ marginTop: 24 }}>Settlement contract</h3>
       <p className="muted">
@@ -127,7 +172,7 @@ export default function Docs() {
         <li>No deposits and no internal balances.</li>
         <li>Every fill must satisfy both parties' signed price limits.</li>
         <li>Cumulative fills per order and exposure per authorization are enforced on-chain.</li>
-        <li>Fill nonces are single-use; replays revert.</li>
+        <li>Each fill settles at most once; replays revert. If less is left than a fill asks for, it settles what's left (at the same price, never more than either side signed).</li>
         <li>Signatures use EIP-712 with low-s enforcement.</li>
         <li>Settlement status comes from the contract, not from receipts, so a forged receipt can't mark a trade as settled.</li>
       </ul>

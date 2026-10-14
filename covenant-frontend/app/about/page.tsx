@@ -11,10 +11,12 @@ export default function About() {
         Execution no longer requires trust.
       </h1>
       <p className="muted">
-        Covenant is an order book for trading ETH, LINK and QNT against USDT on
+        Covenant is an order book for trading ETH against USDT on
         Ethereum, with no backend, no database and no custody. It works like the
         order book you know from any exchange. The difference is that there is
-        no exchange.
+        no exchange. Covenant is one example interface on AON: the orders,
+        the matching rules and the settlement contract are open, and any other
+        interface can use the same ones.
       </p>
 
       {hr}
@@ -73,17 +75,20 @@ export default function About() {
         nobody can pause it, upgrade it or redirect it.
       </p>
       <p className="muted" style={{ marginTop: 12 }}>
-        This website is just one way in. It can't move your tokens. What any
-        interface could do is show you a bad order to sign, which is why the
-        order form spells out your terms in plain words before you sign, and your
-        wallet shows the exact values before you approve.
+        This website is one example interface, and just one way in. Anyone can
+        build another on the same orders and the same contract, and orders placed
+        through any of them meet in the same book. No interface can move your
+        tokens. What any interface could do is show you a bad order to sign,
+        which is why this one spells out your terms in plain words before you
+        sign, and your wallet shows the exact values before you approve.
       </p>
 
       <h3 style={{ marginTop: 24 }}>Partial fills, enforced on-chain</h3>
       <p className="muted">
         The contract keeps a running total of how much of each order has filled
-        and refuses any fill that would exceed it, however many executors are
-        running and in whatever order they submit.
+        and never lets it go past what you signed, however many executors are
+        running and in whatever order they submit. A fill that asks for more than
+        is left settles only what's left, at the same price.
       </p>
 
       <h3 style={{ marginTop: 24 }}>Atomic settlement</h3>

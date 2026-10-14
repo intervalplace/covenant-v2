@@ -10,17 +10,17 @@ import { injected } from "@wagmi/core";
 import { maxUint256, formatUnits, type Address, type Hex } from "viem";
 import {
   MARKETS, SETTLEMENT_CONTRACT, CHAIN_ID, DEMO_MODE, TOKENS,
-  EXECUTOR_FEE_QUOTE, MAX_FILLS_PER_ORDER, MAX_ORDER_QUOTE,
+  EXECUTOR_FEE_BPS, MAX_ORDER_QUOTE, MIN_ORDER_QUOTE, EXCLUSIVE_WINDOW_SECS,
   MAKER_ORDER_TTL_SECS, MARKET_ORDER_TTL_SECS, NATIVE_GAS_RESERVE,
   AUTH_TYPES, ORDER_TYPES, REVOCATION_TYPES, getEvmSpotDomain,
   SIDE_BUY_BASE, SIDE_SELL_BASE, type Market, type Token,
 } from "@/config";
 import {
-  aonPutObject, fetchNamespaceObjects, deriveState, isLive, commitmentsByMakerToken, matchOrder, applyFunding,
+  aonPutObject, fetchNamespaceObjects, deriveState, isLive, isReserved, commitmentsByMakerToken, matchOrder, applyFunding,
   buildAuthMessage, buildOrderMessage, authForSigning, orderForSigning,
   authObject, orderObject, fillObject, revocationMessage, revocationObject,
   toBaseUnits, toPrice, quoteFor, fmtBase, fmtQuote, fmtPrice, fmt, priceNumber, priceToInput,
-  shortHash, shortAddr, formatCountdown,
+  shortHash, shortAddr, formatCountdown, buildSettleCall, settleReceiptObject, settledAmounts, feeForQuote, maxFeeForOrder,
 } from "@/aon";
 import { erc20Abi, wethAbi, evmSpotSettlementAbi } from "@/abi";
 import type { AonObject, RestingOrder, FillView, Log, Side } from "@/types";
@@ -138,6 +138,13 @@ export default function Home() {
   const nativeBalance  = !isConnected ? 0n : DEMO_MODE ? 5n * 10n ** 18n : (nativeBal?.value ?? 0n);
 
   // ── AON + chain refresh ─────────────────────────────────────────────────────
+  // Every AON object we know about (fetched or just published), for self-settle
+  const knownObjects = useRef(new Map<string, AonObject>());
+  const remember = (o: AonObject) => knownObjects.current.set(o.objectHash.toLowerCase(), o);
+  const lookup = (h: string) => knownObjects.current.get(String(h).toLowerCase());
+  const [lastFills, setLastFills] = useState<string[]>([]);
+  const [settling, setSettling] = useState<string | null>(null);
+
   const refreshing = useRef(false);
   const refreshAgain = useRef(false);
   const usedNonceCache = useRef(new Set<string>()); // consumed nonces never un-consume
@@ -147,28 +154,34 @@ export default function Home() {
     refreshing.current = true;
     try {
       const objects = await fetchNamespaceObjects();
+      objects.forEach(remember);
       let state = await deriveState(objects);
       const pc = publicClient;
 
       if (pc && SETTLEMENT_CONTRACT && !DEMO_MODE) {
-        const read = (functionName: "usedFillNonce" | "filledBaseByOrder", arg: Hex) =>
+        const read = (functionName: "usedFill" | "filledBaseByOrder" | "boundFilledBase", arg: Hex) =>
           pc.readContract({ address: SETTLEMENT_CONTRACT, abi: evmSpotSettlementAbi, functionName, args: [arg] } as any);
 
         // 1. Which fills has the contract actually settled? (source of truth)
         const weekAgo = Date.now() - 7 * 86400e3;
-        const unknown = state.fills.filter(f => f.createdAt > weekAgo && !usedNonceCache.current.has(f.fillNonce.toLowerCase()));
+        const unknown = state.fills.filter(f => f.createdAt > weekAgo && !usedNonceCache.current.has(f.fillKey.toLowerCase()));
         await Promise.all(unknown.map(async f => {
-          if (await read("usedFillNonce", f.fillNonce).catch(() => false)) usedNonceCache.current.add(f.fillNonce.toLowerCase());
+          if (await read("usedFill", f.fillKey).catch(() => false)) usedNonceCache.current.add(f.fillKey.toLowerCase());
         }));
 
         // 2. Per-order fill totals (also catches fills settled outside AON)
         const candidates = state.orders.filter(o => !o.cancelled && !o.expired);
-        const filled = new Map<string, bigint>();
+        const filled = new Map<string, bigint>(), bound = new Map<string, bigint>();
         await Promise.all(candidates.map(async o => {
-          const v = await read("filledBaseByOrder", o.orderEip712).catch(() => 0n) as bigint;
-          if (v > 0n) filled.set(o.orderEip712.toLowerCase(), v);
+          const k = o.orderEip712.toLowerCase();
+          const v = await read("filledBaseByOrder", o.orderEip712).catch(() => null) as bigint | null;
+          if (v !== null) filled.set(k, v);
+          if (o.exclusiveBase > 0n) {
+            const b = await read("boundFilledBase", o.orderEip712).catch(() => null) as bigint | null;
+            if (b !== null) bound.set(k, b);
+          }
         }));
-        state = await deriveState(objects, { filled, usedNonces: usedNonceCache.current });
+        state = await deriveState(objects, { filled, usedFills: usedNonceCache.current, bound });
 
         // 3. Hide liquidity the maker can't currently pay for
         const live = state.orders.filter(isLive);
@@ -209,7 +222,8 @@ export default function Home() {
   const B = market.base.symbol;
   const Q = market.quote.symbol;
 
-  const bookOrders = orders.filter(o => o.market.key === market.key && isLive(o) && o.funded);
+  // Reserved orders are still settling against the counterparties they named
+  const bookOrders = orders.filter(o => o.market.key === market.key && isLive(o) && o.funded && !isReserved(o, nowSecs));
   const levels = (s: Side): Level[] => {
     const map = new Map<bigint, Level>();
     for (const o of bookOrders.filter(o => o.side === s)) {
@@ -253,9 +267,9 @@ export default function Home() {
     const m = matchOrder({ book: orders, market, side, amount, limit, me });
     const orderPrice = orderType === "limit" ? limit! : m.worstPrice;
     const orderBase  = orderType === "limit" ? amount : m.filled;
-    const fee = side === "buy" ? EXECUTOR_FEE_QUOTE * BigInt(m.legs.length) : 0n;
-    const maxFeeBudget = side === "buy" ? EXECUTOR_FEE_QUOTE * MAX_FILLS_PER_ORDER : 0n;
+    const fee = side === "buy" ? m.legs.reduce((t, l) => t + feeForQuote(l.quote, EXECUTOR_FEE_BPS), 0n) : 0n;
     const cost = orderPrice ? quoteFor(orderBase, orderPrice) : 0n; // worst case for a buy
+    const maxFeeBudget = side === "buy" ? maxFeeForOrder(cost, EXECUTOR_FEE_BPS) : 0n;
     const need = side === "buy" ? cost + maxFeeBudget : orderBase;
     return { ...m, orderPrice, orderBase, fee, maxFeeBudget, cost, need };
   }, [amount, limit, orderType, side, orders, market, me]);
@@ -272,6 +286,8 @@ export default function Home() {
     if (preview.selfCross) return "This would trade against your own order. Cancel it first or change the price.";
     if (orderType === "market" && preview.filled === 0n) return `No ${side === "buy" ? "sell" : "buy"} orders to match.`;
     if (orderType === "market" && preview.filled < (amount ?? 0n)) return `Only ${fmtBase(market, preview.filled)} ${B} available. The order will be reduced.`;
+    if (preview.orderPrice && quoteFor(preview.orderBase, preview.orderPrice) < MIN_ORDER_QUOTE)
+      return `The minimum order is ${fmtQuote(market, MIN_ORDER_QUOTE)} ${Q}, so settlement gas stays a small part of the trade.`;
     if (MAX_ORDER_QUOTE > 0n && preview.orderPrice && quoteFor(preview.orderBase, preview.orderPrice) > MAX_ORDER_QUOTE)
       return `Orders are limited to ${fmtQuote(market, MAX_ORDER_QUOTE)} ${Q} for now.`;
     if (isConnected && payAvail < preview.need) return `Not enough ${payToken.symbol}. Available: ${fmt(payAvail, payToken.decimals)}.`;
@@ -312,7 +328,8 @@ export default function Home() {
     if (side === "sell") { setAmountHuman(formatUnits(sellAvail * pct / 100n, market.base.decimals)); return; }
     const p = orderType === "limit" ? limit : asks[0]?.price;
     if (!p || p === 0n) return;
-    const spend = quoteAvail * pct / 100n - EXECUTOR_FEE_QUOTE * MAX_FILLS_PER_ORDER;
+    // Leave room for the executor fee (a percentage of what's spent)
+    const spend = (quoteAvail * pct / 100n) * 10_000n / (10_000n + EXECUTOR_FEE_BPS) - (EXECUTOR_FEE_BPS > 0n ? 1n : 0n);
     if (spend <= 0n) return;
     setAmountHuman(formatUnits((spend * 10n ** 18n) / p, market.base.decimals));
   }
@@ -371,7 +388,7 @@ export default function Home() {
     if (base === 0n) { setStatus("Nothing to match."); return; }
 
     const sideNum = side === "buy" ? SIDE_BUY_BASE : SIDE_SELL_BASE;
-    const maxFee  = side === "buy" ? EXECUTOR_FEE_QUOTE * MAX_FILLS_PER_ORDER : 0n;
+    const maxFee  = side === "buy" ? maxFeeForOrder(quoteFor(base, price), EXECUTOR_FEE_BPS) : 0n;
     const need    = side === "buy" ? quoteFor(base, price) + maxFee : base;
 
     try {
@@ -400,27 +417,44 @@ export default function Home() {
       });
       const authObj = authObject(finalize, auth, authSig as Hex);
 
-      const order = buildOrderMessage({ market, trader, side: sideNum, price, baseAmount: base, auth, receiveNative });
+      // Front-running protection: the part that fills now may only trade with
+      // the resting orders matched here, at their prices. Market orders stay
+      // bound for their whole life; a limit order's remainder opens to anyone
+      // once the matched part has filled or the window has passed.
+      // Each named counterparty with the most this order may fill against it
+      const counterSet = m.legs.map(l => ({ orderHash: l.order.orderEip712, maxBase: l.base }));
+      const order = buildOrderMessage({
+        market, trader, side: sideNum, price, baseAmount: base, auth, receiveNative,
+        counterSet, exclusiveBase: m.filled,
+        exclusiveUntil: orderType === "limit" ? Math.floor(Date.now() / 1000) + EXCLUSIVE_WINDOW_SECS : Number(auth.validBefore),
+      });
       setLoading("Sign 2 of 2: order...");
       const orderSig = await signTypedDataAsync({
         domain: getEvmSpotDomain(), types: ORDER_TYPES, primaryType: "SignedOrder",
         message: orderForSigning(order) as any,
       });
-      const orderObj = orderObject(finalize, authObj.objectHash, order, orderSig as Hex);
+      const orderObj = orderObject(finalize, authObj.objectHash, order, orderSig as Hex, counterSet);
 
       setLoading("Publishing to AON...");
-      await aonPutObject(authObj);
-      await aonPutObject(orderObj);
+      await aonPutObject(authObj); remember(authObj);
+      await aonPutObject(orderObj); remember(orderObj);
+      const placedFills: string[] = [];
       addLog(`Order ${shortHash(orderObj.objectHash)}: ${side} ${fmtBase(market, base)} ${B} @ ${fmtPrice(market, price)}`);
 
       // Fills against the book, at each resting order's price
       const feeUsed = new Map<string, bigint>();
       for (const leg of m.legs) {
-        let fee = EXECUTOR_FEE_QUOTE;
-        if (side === "sell") { // resting buyer pays, within their remaining fee budget
+        let fee = feeForQuote(leg.quote, EXECUTOR_FEE_BPS);
+        if (side === "sell") {
+          // The resting buyer pays: within their fee budget, and no more than
+          // their signed cap in proportion to this fill's share of what they may
+          // spend (the contract checks both)
           const k = leg.order.orderObj.objectHash;
+          const makerMax = BigInt(leg.order.authObj.payload.authorization.maxExecutorFeeQuote);
+          const makerMaxQuote = BigInt(leg.order.authObj.payload.authorization.maxQuoteExposure);
+          const proRata = makerMaxQuote > 0n ? (makerMax * leg.quote) / makerMaxQuote : 0n;
           const left = leg.order.feeBudgetLeft - (feeUsed.get(k) ?? 0n);
-          fee = minBig(fee, left > 0n ? left : 0n);
+          fee = minBig(minBig(fee, proRata), left > 0n ? left : 0n);
           feeUsed.set(k, (feeUsed.get(k) ?? 0n) + fee);
         }
         const f = fillObject(finalize, {
@@ -428,7 +462,7 @@ export default function Home() {
           makerOrderHash: leg.order.orderObj.objectHash, takerOrderHash: orderObj.objectHash,
           price: leg.price, baseAmount: leg.base, executorFee: fee,
         });
-        await aonPutObject(f);
+        await aonPutObject(f); remember(f); placedFills.push(f.objectHash);
         addLog(`Fill ${fmtBase(market, leg.base)} ${B} @ ${fmtPrice(market, leg.price)}`);
       }
 
@@ -436,6 +470,7 @@ export default function Home() {
       if (m.filled > 0n) parts.push(`${side === "buy" ? "Bought" : "Sold"} ${fmtBase(market, m.filled)} ${B}, settling on Ethereum`);
       if (orderType === "limit" && m.remainder > 0n) parts.push(`${fmtBase(market, m.remainder)} ${B} resting at ${fmtPrice(market, price)}`);
       setStatus(parts.join(". ") + ".");
+      setLastFills(placedFills);
       setAmountHuman("");
       await refresh();
     } catch (err) {
@@ -484,6 +519,73 @@ export default function Home() {
     } finally { setLoading(null); }
   }
 
+  // How much of a matched fill can still settle: what's left of both orders,
+  // and of any named-counterparty leg that's still reserved.
+  async function fittingBase(call: NonNullable<ReturnType<typeof buildSettleCall>>): Promise<bigint> {
+    const pc = publicClient!;
+    const read = (functionName: any, args: any[]) => pc.readContract({ address: SETTLEMENT_CONTRACT, abi: evmSpotSettlementAbi, functionName, args } as any) as Promise<bigint>;
+    const mo = lookup(call.d.makerOrderHash)!, to = lookup(call.d.takerOrderHash)!;
+    let room = BigInt(call.d.baseAmount);
+    for (const [o, eip, other] of [[mo, call.makerEip, call.takerEip], [to, call.takerEip, call.makerEip]] as const) {
+      const left = BigInt(o.payload.order.baseAmount) - await read("filledBaseByOrder", [eip]);
+      room = minBig(room, left > 0n ? left : 0n);
+      const leg = (o.payload.counterSet ?? []).find((l: any) => String(l.orderHash).toLowerCase() === other.toLowerCase());
+      if (leg && Math.floor(Date.now() / 1000) < Number(o.payload.order.exclusiveUntil)) {
+        const legLeft = BigInt(leg.maxBase) - await read("filledWithCounterparty", [eip, other]);
+        room = minBig(room, legLeft > 0n ? legLeft : 0n);
+      }
+    }
+    return room;
+  }
+
+  // Settle fills from the user's own wallet instead of waiting for an executor.
+  // Same call an executor makes; the contract doesn't care who sends it.
+  async function settleNow(fillHashes: string[]) {
+    if (!requireReady() || !publicClient) return;
+    let done = 0, already = 0;
+    try {
+      for (const [i, h] of fillHashes.entries()) {
+        const call = buildSettleCall(lookup, h);
+        if (!call) { setStatus("Can't find this trade's signed orders yet. Try again in a few seconds."); return; }
+
+        // If someone else traded with either side meanwhile, the contract
+        // settles whatever part still fits. Skip it only if nothing does.
+        const fit = await fittingBase(call);
+        if (fit === 0n || quoteFor(fit, BigInt(call.d.price)) === 0n) { already++; continue; }
+        if (await publicClient.readContract({ address: SETTLEMENT_CONTRACT, abi: evmSpotSettlementAbi, functionName: "usedFill", args: [call.fillKey] })) { already++; continue; }
+        setSettling(h);
+        setLoading(fillHashes.length > 1 ? `Confirm settlement ${i + 1} of ${fillHashes.length} in your wallet...` : "Confirm the settlement in your wallet...");
+        let tx: Hex;
+        try {
+          tx = await writeContractAsync({ address: SETTLEMENT_CONTRACT, abi: evmSpotSettlementAbi, functionName: "settleSpotTrade", args: call.args as any });
+        } catch (e: any) {
+          if (/FillReplay/.test(String(e?.message ?? "") + String(e?.shortMessage ?? ""))) { already++; continue; }
+          throw e;
+        }
+        setLoading("Settling on Ethereum...");
+        const rc = await publicClient.waitForTransactionReceipt({ hash: tx });
+        if (rc.status !== "success") {
+          const raced = await publicClient.readContract({ address: SETTLEMENT_CONTRACT, abi: evmSpotSettlementAbi, functionName: "usedFill", args: [call.fillKey] });
+          throw new Error(raced
+            ? "An executor settled this trade in the same block, so your transaction reverted. The trade is done; only your gas was spent."
+            : "The settlement transaction reverted. The trade wasn't settled.");
+        }
+        done++;
+        const moved = settledAmounts(rc.logs, call.fillKey);
+        addLog(`Settled ${shortHash(h)} yourself${moved && moved.baseAmount < BigInt(call.d.baseAmount) ? ` (${fmtBase(market, moved.baseAmount)} ${B}, what was left)` : ""}: ${shortHash(tx)}`);
+        // Publish the receipt so executors and other interfaces see it's done
+        if (moved) await aonPutObject(settleReceiptObject(finalize, call, tx, moved)).catch(() => {});
+      }
+      setStatus(done
+        ? `Settled ${done} trade${done > 1 ? "s" : ""} from your wallet.${already ? ` ${already} had already been settled by an executor.` : ""}`
+        : "Already settled by an executor. Nothing to do.");
+      setLastFills([]);
+      await refresh();
+    } catch (err) {
+      setStatus(errorText(err));
+    } finally { setLoading(null); setSettling(null); }
+  }
+
   // Loose WETH (not backing any order) back to ETH
   async function unwrapWeth(amount: bigint) {
     if (!requireReady() || !publicClient || amount === 0n) return;
@@ -518,14 +620,14 @@ export default function Home() {
         ? `I will buy up to ${amt} at no more than ${px} each, spending at most ${fmtQuote(market, preview.cost)} ${Q}.`
         : `I will sell up to ${amt} at no less than ${px} each, receiving at least ${fmtQuote(market, preview.cost)} ${Q}.`);
       if (preview.filled > 0n)
-        sentences.push(`${fmtBase(market, preview.filled)} ${B} fills right away at an average of ${fmt(preview.avgPrice!, market.quote.decimals + 18 - market.base.decimals, 2)} ${Q}.`);
+        sentences.push(`${fmtBase(market, preview.filled)} ${B} fills right away at an average of ${fmt(preview.avgPrice!, market.quote.decimals + 18 - market.base.decimals, 2)} ${Q}, only against the orders shown and only at their prices.`);
       if (preview.remainder > 0n)
         sentences.push(`${preview.filled > 0n ? "The rest" : "The order"} waits in the book until ${expiry}, or until I cancel it.`);
     } else {
       sentences.push(side === "buy"
         ? `I will buy ${amt} from the best offers in the book, paying no more than ${px} each and ${fmtQuote(market, preview.quote)} ${Q} in total.`
         : `I will sell ${amt} to the best bids in the book, at no less than ${px} each, for ${fmtQuote(market, preview.quote)} ${Q} in total.`);
-      sentences.push("Nothing is left waiting in the book.");
+      sentences.push("Only the orders shown can fill it, and nothing is left waiting in the book.");
     }
     if (preview.fee > 0n) sentences.push(`I pay the executor ${fmtQuote(market, preview.fee)} ${Q}.`);
     if (wrapNeeded > 0n) sentences.unshift(`First I wrap ${fmtBase(market, wrapNeeded)} ETH so it can be traded.`);
@@ -567,7 +669,7 @@ export default function Home() {
           <div className="hero-arc"><Arc width={500} sagitta={17} thickness={1.5} draw style={{ width: "100%", height: "auto" }} /></div>
           <h1 className="hero-title">Execution no longer requires trust.</h1>
           <p className="hero-sub">
-            Trade ETH, LINK and QNT for USDT from your own wallet. Nobody holds your
+            Trade ETH for USDT from your own wallet. Nobody holds your
             funds. They move only when your exact terms are met, in a single
             Ethereum transaction.
           </p>
@@ -608,12 +710,21 @@ export default function Home() {
       {status && (
         <div className="banner banner-info" role="status">
           <span>{status}</span>
+          {lastFills.some(h => fills.find(f => f.fillHash === h)?.status !== "settled") && (
+            <button className="btn-secondary" style={{ fontSize: 14, padding: "5px 12px" }} onClick={() => settleNow(lastFills)} disabled={!!loading}
+              title="Send the settlement from your own wallet now instead of waiting for an executor. You pay the gas.">
+              Settle now yourself
+            </button>
+          )}
           <button className="link-btn" style={{ marginLeft: "auto" }} onClick={() => setStatus("")}>Dismiss</button>
         </div>
       )}
 
       {/* Market bar */}
       <div className="market-bar">
+        {MARKETS.length === 1 ? (
+          <h2 className="market-title">{market.label}</h2>
+        ) : (
         <div className="market-tabs" role="tablist" aria-label="Market">
           {MARKETS.map(m => (
             <button key={m.key} role="tab" aria-selected={m.key === market.key}
@@ -622,6 +733,7 @@ export default function Home() {
             </button>
           ))}
         </div>
+        )}
         <div className="market-stats">
           <div title={reference ? `Chainlink ${B}/USD${reference.quoteIsUsd ? "" : `, converted to ${Q}`}. Updated ${new Date(reference.updatedAt).toLocaleTimeString()}.` : `No Chainlink feed for ${B}`}>
             <div className="stat-label">Market price</div>
@@ -881,6 +993,12 @@ export default function Home() {
                               title={f.executionTx ? "View the settlement transaction" : "View on AON"}>
                               {timeline(f)}
                             </a>
+                            {f.status === "pending" && (
+                              <button className="link-btn" style={{ marginLeft: 12 }} onClick={() => settleNow([f.fillHash])} disabled={!!loading}
+                                title="Send the settlement from your own wallet now instead of waiting for an executor. You pay the gas.">
+                                {settling === f.fillHash ? "Settling…" : "Settle now"}
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );

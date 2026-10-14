@@ -162,7 +162,15 @@ button:disabled { opacity: 0.45; cursor: default; }
 .nav-links a { color: var(--muted); }
 .nav-links a[aria-current="page"] { color: var(--fg); font-weight: 500; }
 .nav-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
-.net-status { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); }
+.net-status { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); background: none; border: none; padding: 6px 8px; border-radius: 6px; }
+.net-status:hover:not(:disabled) { background: rgba(255,255,255,0.6); color: var(--fg); }
+.nav-right { position: relative; }
+.conn-panel {
+  position: absolute; top: calc(100% + 10px); right: 0; width: min(420px, calc(100vw - 32px));
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-panel);
+  padding: 18px; box-shadow: 0 16px 40px -16px rgba(23,32,51,0.35); z-index: 200;
+}
+.conn-panel input { font-size: 14px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
 .dot-live { background: var(--buy); box-shadow: 0 0 0 3px var(--buy-soft); }
 .dot-down { background: var(--sell); box-shadow: 0 0 0 3px var(--sell-soft); }
@@ -210,6 +218,7 @@ button:disabled { opacity: 0.45; cursor: default; }
 .tab:hover:not(:disabled) { background: rgba(255,255,255,0.6); color: var(--fg); }
 .tab-on, .tab-on:hover:not(:disabled) { background: var(--surface); color: var(--fg); box-shadow: 0 1px 2px rgba(23,32,51,0.12); }
 .market-stats { display: flex; gap: 30px; }
+.market-title { font: 600 26px/1.2 var(--sans); letter-spacing: -0.01em; }
 .stat-label { font-size: 13px; color: var(--muted); }
 .stat { font-size: 18px; font-weight: 500; margin-top: 1px; }
 .market-note { font-size: 14px; color: var(--muted); margin: -6px 0 16px; }
@@ -350,6 +359,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   display: flex; gap: 24px; flex-wrap: wrap; font-size: 14px; color: var(--muted);
 }
 .site-footer .spacer { flex: 1; }
+.mono { font-family: var(--mono); font-size: 13px; }
 
 /* ── Responsive ────────────────────────────────────────────────────────────── */
 @media (max-width: 1060px) {

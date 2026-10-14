@@ -4,22 +4,26 @@
  */
 
 import {
+  keccak256, encodeAbiParameters, decodeEventLog,
   getAddress, hashTypedData, verifyTypedData, formatUnits, parseUnits,
   type Address, type Hex,
 } from "viem";
 import {
-  AON_NODE_URL, NAMESPACE, MARKETS, SETTLEMENT_CONTRACT, CHAIN_ID,
+  NAMESPACE, MARKETS, SETTLEMENT_CONTRACT, CHAIN_ID,
   AUTH_TYPES, ORDER_TYPES, REVOCATION_TYPES, getEvmSpotDomain,
   SIDE_BUY_BASE, SIDE_SELL_BASE, sideMaskFor, marketById, type Market,
 } from "./config";
+import { aonFetch } from "./endpoints";
+import { evmSpotSettlementAbi } from "./abi";
 import type {
+  CounterLeg,
   AonObject, AuthMessage, OrderMessage, RestingOrder, FillView, Side,
 } from "./types";
 
 // ── Node client ───────────────────────────────────────────────────────────────
 
 export async function aonPutObject(obj: any): Promise<{ objectHash: string }> {
-  const res = await fetch(`${AON_NODE_URL}/v1/objects`, {
+  const res = await aonFetch(`/v1/objects`, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify(obj),
@@ -31,13 +35,13 @@ export async function aonPutObject(obj: any): Promise<{ objectHash: string }> {
   return { objectHash: body.objectHash };
 }
 
-// Pulls the whole namespace (paged). Fine at demo scale.
-export async function fetchNamespaceObjects(maxPages = 5): Promise<AonObject[]> {
+// Pulls the whole namespace (paged, up to 50k objects; see README "Scale").
+export async function fetchNamespaceObjects(maxPages = 50): Promise<AonObject[]> {
   const out: AonObject[] = [];
   const pageSize = 1000;
   for (let page = 0; page < maxPages; page++) {
-    const res = await fetch(
-      `${AON_NODE_URL}/v1/objects?namespace=${encodeURIComponent(NAMESPACE)}&limit=${pageSize}&offset=${page * pageSize}`
+    const res = await aonFetch(
+      `/v1/objects?namespace=${encodeURIComponent(NAMESPACE)}&limit=${pageSize}&offset=${page * pageSize}`
     );
     if (!res.ok) throw new Error(`AON_GET_FAILED: ${res.status}`);
     const data = await res.json();
@@ -139,8 +143,9 @@ const isRealTx = (tx?: string) => /^0x[0-9a-fA-F]{64}$/.test(tx ?? "");
 // On-chain facts, when an RPC is available. With these, "settled" means the
 // contract consumed the fill's nonce — AON receipts are only used for the tx link.
 export type ChainFacts = {
-  filled:     Map<string, bigint>; // order EIP-712 hash -> filledBaseByOrder
-  usedNonces: Set<string>;         // fill nonces the contract has consumed
+  filled:     Map<string, bigint>; // order EIP-712 hash -> filledBaseByOrder (every order read)
+  usedFills:  Set<string>;         // fill keys the contract has consumed (usedFill)
+  bound?:     Map<string, bigint>; // bound orders: EIP-712 hash -> boundFilledBase
 };
 
 export type MarketState = {
@@ -197,6 +202,14 @@ export async function deriveState(
     // Native payout is only valid on buy orders in a wrapped-native market
     if (typeof o.receiveNative !== "boolean") continue;
     if (o.receiveNative && (o.side !== SIDE_BUY_BASE || !marketById(o.marketId)?.base.wrapsNative)) continue;
+    // Counter set must match what was signed
+    if (!/^0x[0-9a-fA-F]{64}$/.test(String(o.counterSetHash))) continue;
+    if (o.counterSetHash.toLowerCase() !== ZERO32) {
+      const set = obj.payload?.counterSet;
+      if (!Array.isArray(set) || !set.length || !set.every((l: any) => /^0x[0-9a-fA-F]{64}$/.test(String(l?.orderHash)) && /^\d+$/.test(String(l?.maxBase)))) continue;
+      if (new Set(set.map((l: any) => String(l.orderHash).toLowerCase())).size !== set.length) continue; // duplicate counterparties
+      if (counterSetHashOf(set.map((l: any) => ({ orderHash: l.orderHash, maxBase: BigInt(l.maxBase) }))).toLowerCase() !== o.counterSetHash.toLowerCase()) continue;
+    }
     if (!(await verifySigned(obj, o, "SignedOrder", o.trader))) continue;
     orders.set(obj.objectHash.toLowerCase(), { obj, o, auth, eip: orderEip712(o, obj.objectHash) });
   }
@@ -214,7 +227,20 @@ export async function deriveState(
       revoked.add(target);
     }
   }
-  const isRevoked = (x: O) => revoked.has(x.obj.objectHash.toLowerCase()) || revoked.has(x.auth.objectHash.toLowerCase());
+  // One entry per signed order. Anyone can republish an order object (e.g.
+  // with another createdAt); it's the same signed order, so every copy maps to
+  // one canonical entry and all accounting is per signed order.
+  const canonical = new Map<string, O>();               // eip -> entry
+  for (const x of [...orders.values()].sort((a, b) => a.obj.createdAt - b.obj.createdAt)) {
+    if (!canonical.has(x.eip.toLowerCase())) canonical.set(x.eip.toLowerCase(), x);
+  }
+  const resolve = (objHash: string) => {
+    const x = orders.get(String(objHash).toLowerCase());
+    return x ? canonical.get(x.eip.toLowerCase()) : undefined;
+  };
+  // A cancellation of any copy (or of the authorization) cancels the signed order
+  const revokedEips = new Set([...orders.values()].filter(x => revoked.has(x.obj.objectHash.toLowerCase())).map(x => x.eip.toLowerCase()));
+  const isRevoked = (x: O) => revokedEips.has(x.eip.toLowerCase()) || revoked.has(x.auth.objectHash.toLowerCase());
   const isExpired = (x: O) => Math.min(Number(x.o.validBefore), Number(x.auth.payload.authorization.validBefore)) < nowSecs;
 
   // 4. Receipts by fill hash
@@ -233,18 +259,32 @@ export async function deriveState(
   const reservedBy = new Map<string, bigint>();
   const feeUsedByAuth = new Map<string, bigint>();
   const add = (m: Map<string, bigint>, k: string, v: bigint) => m.set(k, (m.get(k) ?? 0n) + v);
+  // Reserved-part fills of bound orders (against a named counterparty)
+  const boundSettledBy = new Map<string, bigint>(), boundPendingBy = new Map<string, bigint>();
+  const legsOfOrder = (x: O) => new Set(((x.obj.payload?.counterSet ?? []) as any[]).map(l => String(l.orderHash).toLowerCase()));
+  const seenKeys = new Set<string>();
 
-  for (const f of of("fill")) {
+  // Oldest first: if a fill object is cloned, the original is the one counted
+  for (const f of [...of("fill")].sort((a, b) => a.createdAt - b.createdAt)) {
     const d = f.payload?.fill;
     if (f.payload?.fillType !== "evm_spot_fill" || !d) continue;
-    const mk = orders.get(String(d.makerOrderHash).toLowerCase());
-    const tk = orders.get(String(d.takerOrderHash).toLowerCase());
+    const mk = resolve(d.makerOrderHash);
+    const tk = resolve(d.takerOrderHash);
     if (!mk || !tk) continue;
-    const receipt = receiptFor.get(f.objectHash.toLowerCase());
-    const base = BigInt(d.baseAmount);
+    let fillKey: Hex;
+    try { fillKey = fillKeyOf(d.fillNonce, mk.eip, tk.eip, BigInt(d.price), BigInt(d.baseAmount), BigInt(d.quoteAmount), BigInt(d.executorFeeQuoteAmount ?? 0)); } catch { continue; }
+    if (seenKeys.has(fillKey.toLowerCase())) continue; // a clone of a fill we already have
+    seenKeys.add(fillKey.toLowerCase());
+    let receipt = receiptFor.get(f.objectHash.toLowerCase());
+    // Only trust a receipt's tx link if it claims this exact fill
+    if (receipt?.payload?.fillKey && String(receipt.payload.fillKey).toLowerCase() !== fillKey.toLowerCase()) receipt = undefined;
     const settled = chain
-      ? chain.usedNonces.has(String(d.fillNonce).toLowerCase())
+      ? chain.usedFills.has(fillKey.toLowerCase())
       : !!receipt;
+    // The contract settles whatever part of a fill still fits; a receipt
+    // reports what actually moved.
+    const claimed = settled && receipt?.payload?.baseAmount ? BigInt(receipt.payload.baseAmount) : null;
+    const base = claimed !== null && claimed < BigInt(d.baseAmount) ? claimed : BigInt(d.baseAmount);
     // A fill can't settle once either side is cancelled or expired
     const dead = isRevoked(mk) || isRevoked(tk) || isExpired(mk) || isExpired(tk);
     const status = settled ? "settled"
@@ -258,18 +298,20 @@ export async function deriveState(
       makerOrderHash: mk.obj.objectHash,
       takerOrderHash: tk.obj.objectHash,
       fillNonce:   d.fillNonce,
+      fillKey,
       price:       BigInt(d.price),
       baseAmount:  base,
-      quoteAmount: BigInt(d.quoteAmount),
+      quoteAmount: base === BigInt(d.baseAmount) ? BigInt(d.quoteAmount) : quoteFor(base, BigInt(d.price)),
       status,
       executionTx: settled ? receipt?.payload?.executionTx : undefined,
       createdAt:   f.createdAt,
       settledAt:   receipt?.createdAt,
     });
     if (status === "stale") continue;
-    for (const side of [mk, tk]) {
+    for (const [side, other] of [[mk, tk], [tk, mk]] as const) {
       const k = side.obj.objectHash.toLowerCase();
       add(status === "settled" ? settledBy : reservedBy, k, base);
+      if (legsOfOrder(side).has(other.eip.toLowerCase())) add(status === "settled" ? boundSettledBy : boundPendingBy, k, base);
     }
     const buyerAuth = (mk.o.side === SIDE_BUY_BASE ? mk : tk).auth.objectHash.toLowerCase();
     add(feeUsedByAuth, buyerAuth, BigInt(d.executorFeeQuoteAmount ?? 0));
@@ -277,14 +319,25 @@ export async function deriveState(
 
   // 6. Orders with their live remaining size
   const out: RestingOrder[] = [];
-  for (const [h, { obj, o, auth, eip }] of orders) {
+  for (const { obj, o, auth, eip } of canonical.values()) {
+    const h = obj.objectHash.toLowerCase();
     const a = auth.payload.authorization as AuthMessage;
     const validBefore = Math.min(Number(o.validBefore), Number(a.validBefore));
     const total = BigInt(o.baseAmount);
-    const settled = [settledBy.get(h) ?? 0n, onchainFilled.get(eip.toLowerCase()) ?? 0n]
-      .reduce((x, y) => (x > y ? x : y));
+    // When the contract was read, its totals are the truth (a fill can settle
+    // for less than its size, so fill objects alone can overstate it)
+    const settled = onchainFilled.has(eip.toLowerCase())
+      ? onchainFilled.get(eip.toLowerCase())!
+      : settledBy.get(h) ?? 0n;
     const reserved = reservedBy.get(h) ?? 0n;
-    const remaining = total - settled - reserved;
+    const exclusiveBase = BigInt(o.exclusiveBase ?? 0), exclusiveUntil = Number(o.exclusiveUntil ?? 0);
+    const boundSettled = chain?.bound?.get(eip.toLowerCase()) ?? boundSettledBy.get(h) ?? 0n, boundPending = boundPendingBy.get(h) ?? 0n;
+    // After the window, an unfilled reserved part is void: only the unreserved
+    // part can still fill (the contract enforces the same)
+    const voided = o.counterSetHash.toLowerCase() !== ZERO32 && nowSecs >= exclusiveUntil && boundSettled < exclusiveBase;
+    const remaining = voided
+      ? (total - exclusiveBase) - (settled - boundSettled) - (reserved - boundPending)
+      : total - settled - reserved;
     const isBuy = o.side === SIDE_BUY_BASE;
     const feeLeft = BigInt(a.maxExecutorFeeQuote) - (feeUsedByAuth.get(auth.objectHash.toLowerCase()) ?? 0n);
     out.push({
@@ -299,6 +352,9 @@ export async function deriveState(
       validBefore,
       createdAt:   obj.createdAt,
       cancelled:   isRevoked({ obj, o, auth, eip }),
+      exclusiveBase,
+      exclusiveUntil,
+      boundFilled: boundSettled,
       expired:     validBefore <= nowSecs + 60,
       feeBudgetLeft: isBuy && feeLeft > 0n ? feeLeft : 0n,
       funded:      true,
@@ -367,6 +423,11 @@ export type MatchResult = {
 
 export const MAX_LEGS_PER_ORDER = 10;
 
+// An order whose immediate part is still reserved for the counterparties it
+// named can't be taken by anyone else yet (the contract would reject it).
+export const isReserved = (o: RestingOrder, nowSecs = Math.floor(Date.now() / 1000)) =>
+  o.exclusiveBase > 0n && nowSecs < o.exclusiveUntil && o.boundFilled < o.exclusiveBase;
+
 export function matchOrder(args: {
   book: RestingOrder[]; market: Market; side: Side; amount: bigint;
   limit: bigint | null;       // null = market order
@@ -374,7 +435,7 @@ export function matchOrder(args: {
 }): MatchResult {
   const me = args.me?.toLowerCase();
   const opposite = args.book
-    .filter(o => o.market.key === args.market.key && isLive(o) && o.funded
+    .filter(o => o.market.key === args.market.key && isLive(o) && o.funded && !isReserved(o)
       && o.side === (args.side === "buy" ? "sell" : "buy"))
     .filter(o => args.limit === null || (args.side === "buy" ? o.price <= args.limit : o.price >= args.limit))
     .sort((a, b) =>
@@ -442,7 +503,11 @@ export function buildAuthMessage(args: {
 export function buildOrderMessage(args: {
   market: Market; trader: Address; side: number; price: bigint;
   baseAmount: bigint; auth: AuthMessage; receiveNative?: boolean;
+  // The resting orders this order fills right away (their EIP-712 hashes),
+  // how much of it they cover, and until when that part is reserved for them.
+  counterSet?: CounterLeg[]; exclusiveBase?: bigint; exclusiveUntil?: number;
 }): OrderMessage {
+  const bound = !!args.counterSet && args.counterSet.length > 0 && (args.exclusiveBase ?? 0n) > 0n;
   // Only a buy order on a wrapped-native market can ask for native payout;
   // the contract rejects it anywhere else.
   const native = !!args.receiveNative && args.side === SIDE_BUY_BASE && !!args.market.base.wrapsNative;
@@ -457,8 +522,30 @@ export function buildOrderMessage(args: {
     validAfter:      args.auth.validAfter,
     validBefore:     args.auth.validBefore,
     receiveNative:   native,
+    counterSetHash:  bound ? counterSetHashOf(args.counterSet!) : ZERO32,
+    exclusiveBase:   (bound ? args.exclusiveBase! : 0n).toString(),
+    exclusiveUntil:  String(bound ? args.exclusiveUntil ?? 0 : 0),
   };
 }
+
+export const ZERO32 = `0x${"00".repeat(32)}` as Hex;
+// keccak256(abi.encode(CounterLeg[])), matching the contract
+export const counterSetHashOf = (legs: CounterLeg[]) =>
+  keccak256(encodeAbiParameters(
+    [{ type: "tuple[]", components: [{ name: "orderHash", type: "bytes32" }, { name: "maxBase", type: "uint256" }] }],
+    [legs.map(l => ({ orderHash: l.orderHash, maxBase: l.maxBase }))],
+  ));
+
+// The contract's replay key for a fill: every field of it
+export const fillKeyOf = (fillNonce: Hex, makerOrderEip712: Hex, takerOrderEip712: Hex, price: bigint, base: bigint, quote: bigint, fee: bigint) =>
+  keccak256(encodeAbiParameters(
+    [{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }],
+    [fillNonce, makerOrderEip712, takerOrderEip712, price, base, quote, fee]));
+
+// Executor fee, in basis points of a fill's quote amount
+export const feeForQuote = (quote: bigint, bps: bigint) => (quote * bps) / 10_000n;
+// The buyer's signed fee cap for a whole order (one unit of headroom for rounding)
+export const maxFeeForOrder = (orderQuote: bigint, bps: bigint) => (bps > 0n ? (orderQuote * bps) / 10_000n + 1n : 0n);
 
 // EIP-712 messages with bigint uints, for wallet signing.
 export const authForSigning = (a: AuthMessage) => ({
@@ -471,6 +558,7 @@ export const orderForSigning = (o: OrderMessage) => ({
   ...o,
   price: BigInt(o.price), baseAmount: BigInt(o.baseAmount),
   validAfter: BigInt(o.validAfter), validBefore: BigInt(o.validBefore),
+  exclusiveBase: BigInt(o.exclusiveBase), exclusiveUntil: BigInt(o.exclusiveUntil),
 });
 
 export function authObject(finalize: (o: any) => any, a: AuthMessage, sig: Hex) {
@@ -485,11 +573,14 @@ export function authObject(finalize: (o: any) => any, a: AuthMessage, sig: Hex) 
   });
 }
 
-export function orderObject(finalize: (o: any) => any, authHash: string, o: OrderMessage, sig: Hex) {
+export function orderObject(finalize: (o: any) => any, authHash: string, o: OrderMessage, sig: Hex, legs: CounterLeg[] = []) {
+  const counterSet = legs.map(l => ({ orderHash: l.orderHash, maxBase: l.maxBase.toString() }));
   return finalize({
     objectType: "order", schemaVersion: "1", namespace: NAMESPACE,
     createdAt: Date.now(), references: [authHash.toLowerCase()],
-    payload: { orderType: "evm_spot_order", order: o },
+    // The counter set itself rides next to the signed order; the contract
+    // checks it against the signed counterSetHash.
+    payload: { orderType: "evm_spot_order", order: o, ...(o.counterSetHash !== ZERO32 ? { counterSet } : {}) },
     signature: {
       scheme: "eip712", signer: o.trader, domain: getEvmSpotDomain(),
       types: ORDER_TYPES, primaryType: "SignedOrder", message: o, signature: sig,
@@ -566,3 +657,69 @@ export function formatCountdown(seconds: number) {
 
 export { SIDE_BUY_BASE, SIDE_SELL_BASE };
 export type { Side };
+
+
+// ── Self-settle ───────────────────────────────────────────────────────────────
+// Rebuild the exact settleSpotTrade call an executor would make, from the
+// published AON objects, so a trader can submit it from their own wallet.
+
+const legsOf = (o: AonObject) => ((o.payload?.counterSet ?? []) as any[]).map(l => ({ orderHash: l.orderHash as Hex, maxBase: BigInt(l.maxBase) }));
+const authTupleOf = (a: AuthMessage) => ({ ...authForSigning(a), sideMask: Number(a.sideMask) });
+const orderTupleOf = (o: OrderMessage) => ({ ...orderForSigning(o), side: Number(o.side) });
+
+export function buildSettleCall(lookup: (hash: string) => AonObject | undefined, fillHash: string) {
+  const f = lookup(fillHash);
+  const d = f?.payload?.fill;
+  if (!f || !d) return null;
+  const mA = lookup(d.makerAuthHash), tA = lookup(d.takerAuthHash), mO = lookup(d.makerOrderHash), tO = lookup(d.takerOrderHash);
+  if (!mA || !tA || !mO || !tO) return null;
+  const sig = (o: AonObject) => (o.signature?.signature ?? o.payload?.signature?.signature) as Hex;
+  const mo = mO.payload.order as OrderMessage, to = tO.payload.order as OrderMessage;
+  const args = [
+    authTupleOf(mA.payload.authorization), sig(mA), orderTupleOf(mo), sig(mO),
+    authTupleOf(tA.payload.authorization), sig(tA), orderTupleOf(to), sig(tO),
+    {
+      makerOrderHash: orderEip712(mo), takerOrderHash: orderEip712(to),
+      makerAuthHash: mo.sessionAuthHash, takerAuthHash: to.sessionAuthHash,
+      price: BigInt(d.price), baseAmount: BigInt(d.baseAmount), quoteAmount: BigInt(d.quoteAmount),
+      executorFeeQuoteAmount: BigInt(d.executorFeeQuoteAmount ?? 0), fillNonce: d.fillNonce as Hex,
+      makerCounterSet: legsOf(mO), takerCounterSet: legsOf(tO),
+    },
+  ] as const;
+  const makerEip = orderEip712(mo), takerEip = orderEip712(to);
+  return { args, fillNonce: d.fillNonce as Hex, fillKey: fillKeyOf(d.fillNonce, makerEip, takerEip, BigInt(d.price), BigInt(d.baseAmount), BigInt(d.quoteAmount), BigInt(d.executorFeeQuoteAmount ?? 0)), makerEip, takerEip, d,
+    fill: f, makerAuthHash: mA.objectHash, takerAuthHash: tA.objectHash };
+}
+
+/** The same receipt an executor publishes, so everyone sees the fill as done. */
+// What a settlement actually moved, from its SpotTradeSettled event. The
+// contract settles as much of a fill as still fits, which can be less than
+// the fill asked for.
+export function settledAmounts(logs: readonly { address: string; data: Hex; topics: readonly Hex[] }[], fillKey: Hex) {
+  for (const l of logs) {
+    if (l.address.toLowerCase() !== SETTLEMENT_CONTRACT.toLowerCase()) continue;
+    try {
+      const ev: any = decodeEventLog({ abi: evmSpotSettlementAbi, data: l.data, topics: l.topics as any });
+      if (ev.eventName !== "SpotTradeSettled" || String(ev.args.fillKey).toLowerCase() !== fillKey.toLowerCase()) continue;
+      return { baseAmount: ev.args.baseAmount as bigint, quoteAmount: ev.args.quoteAmount as bigint, executorFeeQuoteAmount: ev.args.executorFeeQuoteAmount as bigint };
+    } catch {}
+  }
+  return null;
+}
+
+export function settleReceiptObject(finalize: (o: any) => any, call: NonNullable<ReturnType<typeof buildSettleCall>>, tx: Hex,
+  moved: { baseAmount: bigint; quoteAmount: bigint; executorFeeQuoteAmount: bigint }) {
+  return finalize({
+    objectType: "receipt", schemaVersion: "1", namespace: NAMESPACE, createdAt: Date.now(),
+    references: [call.fill.objectHash, call.makerAuthHash, call.takerAuthHash].map(h => h.toLowerCase()),
+    payload: {
+      receiptType: "authorized_state_transition_completed",
+      executionTx: tx, settlementContract: getAddress(SETTLEMENT_CONTRACT),
+      // Every claim is checked against the on-chain event and against the fill
+      fillKey: call.fillKey, fillNonce: call.fillNonce,
+      makerOrderHash: call.makerEip, takerOrderHash: call.takerEip,
+      price: String(call.d.price), baseAmount: String(moved.baseAmount), quoteAmount: String(moved.quoteAmount),
+      executorFeeQuoteAmount: String(moved.executorFeeQuoteAmount),
+    },
+  });
+}

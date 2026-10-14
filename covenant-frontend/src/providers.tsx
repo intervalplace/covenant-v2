@@ -1,5 +1,6 @@
 "use client";
-import { WagmiProvider, createConfig, http } from "wagmi";
+import { WagmiProvider, createConfig, http, fallback, custom } from "wagmi";
+import { rpcPlan, walletReader } from "./endpoints";
 import { mainnet } from "wagmi/chains";
 import { injected } from "@wagmi/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -14,15 +15,23 @@ const hardhat = defineChain({
 
 const isDev = process.env.NEXT_PUBLIC_CHAIN_ID === "31337";
 
-// Allow a custom RPC URL via env to avoid CORS issues with the default
-// wagmi public transport (eth.merkle.io blocks localhost requests).
-// Set NEXT_PUBLIC_ETH_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/<key>
-const ethRpc = process.env.NEXT_PUBLIC_ETH_RPC_URL;
+// Ethereum connection, in priority order: the RPC the user set in
+// Connections, then their own wallet (once connected and on mainnet), then
+// NEXT_PUBLIC_ETH_RPC_URL and public fallbacks. If one fails, the next is used.
+function mainnetTransport() {
+  const { override, rest } = rpcPlan();
+  const eth = typeof window !== "undefined" ? (window as any).ethereum : undefined;
+  return fallback([
+    ...override.map(u => http(u)),
+    ...(eth ? [custom(walletReader(eth, mainnet.id))] : []),
+    ...rest.map(u => http(u)),
+  ]);
+}
 
 const mainnetConfig = createConfig({
   chains:     [mainnet],
   connectors: [injected()],
-  transports: { [mainnet.id]: ethRpc ? http(ethRpc) : http() },
+  transports: { [mainnet.id]: mainnetTransport() },
   ssr: true,
 });
 

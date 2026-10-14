@@ -41,7 +41,15 @@ export type OrderMessage = {
   validAfter:      string;
   validBefore:     string;
   receiveNative:   boolean;  // buy orders on WETH markets: paid out as native ETH
+  // Front-running protection: until exclusiveUntil, the first exclusiveBase
+  // can only fill against the orders in the counter set, at their prices.
+  counterSetHash:  Hex;
+  exclusiveBase:   string;
+  exclusiveUntil:  string;
 };
+
+// A named counterparty of a bound order and the most it may fill against it
+export type CounterLeg = { orderHash: Hex; maxBase: bigint };
 
 export type Side = "buy" | "sell";
 
@@ -58,6 +66,9 @@ export type RestingOrder = {
   validBefore:  number;        // unix seconds
   createdAt:    number;        // ms
   cancelled:    boolean;
+  exclusiveBase:  bigint;      // portion reserved for named counterparties…
+  exclusiveUntil: number;      // …until this time (unix seconds)
+  boundFilled:    bigint;      // settled against those named counterparties
   expired:      boolean;
   feeBudgetLeft: bigint;       // buy orders: executor fee budget left
   funded:       boolean;       // maker's wallet currently covers it
@@ -77,6 +88,7 @@ export type FillView = {
   makerOrderHash: string;
   takerOrderHash: string;
   fillNonce:    Hex;
+  fillKey:      Hex;           // keccak256(fillNonce, makerOrderHash, takerOrderHash): the contract's replay key
   price:        bigint;
   baseAmount:   bigint;
   quoteAmount:  bigint;

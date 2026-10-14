@@ -6,7 +6,7 @@
 
 import { keccak256, toBytes, type Address, type Hex } from "viem";
 
-export const AON_NODE_URL = process.env.NEXT_PUBLIC_AON_NODE_URL ?? "https://explorer.aon.network";
+// AON nodes and RPCs (with fallbacks and user overrides) live in endpoints.ts
 export const CHAIN_ID     = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 1);
 export const NAMESPACE   = "aon:evm-spot";
 
@@ -17,12 +17,19 @@ export const SETTLEMENT_CONTRACT = (process.env.NEXT_PUBLIC_EVM_SPOT_SETTLEMENT 
 // AON object creation is still real.
 export const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 
-// Executor fee paid by the buyer per fill, in quote-token units (USDT has 6
-// decimals, so 100000 = 0.10 USDT). 0 means the Covenant executor settles for free.
-export const EXECUTOR_FEE_QUOTE = BigInt(process.env.NEXT_PUBLIC_EXECUTOR_FEE_QUOTE ?? "0");
-// A buy order can be filled in many pieces (sweeping levels, then resting);
-// its authorization budgets the executor fee for up to this many fills.
-export const MAX_FILLS_PER_ORDER = 20n;
+// Executor fee paid by the buyer, in basis points of each fill's quote amount
+// (10 = 0.10%). 0 means no fee. The contract caps it in proportion to each
+// fill's share of the order, so a fee is always a percentage, never a flat cut.
+export const EXECUTOR_FEE_BPS = BigInt(process.env.NEXT_PUBLIC_EXECUTOR_FEE_BPS || "0");
+
+// Minimum order size in quote units (default 25 USDT). Settlement is a mainnet
+// transaction, so tiny orders would cost more in gas than they're worth.
+export const MIN_ORDER_QUOTE = BigInt(process.env.NEXT_PUBLIC_MIN_ORDER_QUOTE || "25000000");
+
+// How long the part of an order that fills immediately has to settle against
+// the orders it matched. If it hasn't by then, the order stops filling
+// (front-running protection, enforced by the contract).
+export const EXCLUSIVE_WINDOW_SECS = 300;
 
 // Optional interface-level order size cap, in quote units (0 = no cap).
 // Not enforced by the settlement contract. Settlement is atomic, so there is
@@ -90,11 +97,17 @@ function market(base: Token, quote: Token, note?: string): Market {
 
 // NOTE: the settlement contract prices in quote-per-base scaled by 1e18 and
 // assumes an 18-decimal base token. Only add markets whose base has 18 decimals.
-export const MARKETS: Market[] = [
+const ALL_MARKETS: Market[] = [
   market(TOKENS.WETH, TOKENS.USDT, "Trade with plain ETH. Buys pay out real ETH; when you sell, any ETH that needs wrapping is wrapped as part of the order."),
   market(TOKENS.LINK, TOKENS.USDT),
   market(TOKENS.QNT,  TOKENS.USDT),
 ];
+
+// Which markets are listed, by key. Launch with one busy book; add more later
+// with NEXT_PUBLIC_MARKETS=ETH-USDT,LINK-USDT (no contract change needed).
+const listed = (process.env.NEXT_PUBLIC_MARKETS || "ETH-USDT").split(",").map(s => s.trim().toUpperCase());
+export const MARKETS: Market[] = ALL_MARKETS.filter(m => listed.includes(m.key.toUpperCase()));
+if (MARKETS.length === 0) MARKETS.push(ALL_MARKETS[0]);
 
 export function marketById(id?: string): Market | undefined {
   if (!id) return undefined;
@@ -144,6 +157,9 @@ export const ORDER_TYPES = {
     { name: "validAfter",      type: "uint64"  },
     { name: "validBefore",     type: "uint64"  },
     { name: "receiveNative",   type: "bool"    },
+    { name: "counterSetHash",  type: "bytes32" },
+    { name: "exclusiveBase",   type: "uint256" },
+    { name: "exclusiveUntil",  type: "uint64"  },
   ],
 } as const;
 

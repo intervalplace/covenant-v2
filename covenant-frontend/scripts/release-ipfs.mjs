@@ -15,10 +15,14 @@
  *   --skip-build    Pack the existing ./out without rebuilding.
  *
  * The same commit always produces the same CID, so anyone can verify a
- * release by rebuilding it.
+ * release by rebuilding it. To make that hold on any machine, the build runs
+ * from the committed files only, in one fixed location
+ * (/tmp/covenant-release/covenant-frontend) with a clean install: Next.js
+ * derives internal module ids from absolute paths, so building in another
+ * folder would give a different CID.
  */
 import { spawnSync, execSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, rmSync, cpSync } from "node:fs";
 
 const run = (cmd, args, opts = {}) => {
   const r = spawnSync(cmd, args, { stdio: ["ignore", "pipe", "inherit"], encoding: "utf8", ...opts });
@@ -45,9 +49,26 @@ let commit = "unknown";
 try { commit = execSync("git rev-parse --short=12 HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim(); } catch {}
 const buildId = process.env.BUILD_ID || commit;
 
+const STAGE_ROOT = "/tmp/covenant-release";
+const STAGE = `${STAGE_ROOT}/covenant-frontend`;
 if (!process.argv.includes("--skip-build")) {
-  console.log(`Building static site (build id ${buildId})…`);
-  run("npx", ["next", "build"], { stdio: "inherit", env: { ...process.env, BUILD_ID: buildId, NEXT_TELEMETRY_DISABLED: "1" } });
+  let prefix;
+  try { prefix = execSync("git rev-parse --show-prefix", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim(); }
+  catch { console.error("✗ Releases are built from a git checkout (the commit is what makes them reproducible)."); process.exit(1); }
+  const dirty = execSync("git status --porcelain --untracked-files=no -- .").toString().trim();
+  if (dirty) { console.error(`✗ Uncommitted changes:\n${dirty}\nCommit them first: a release is built from the commit.`); process.exit(1); }
+
+  console.log(`Building static site (build id ${buildId}) from the commit, in ${STAGE}…`);
+  rmSync(STAGE_ROOT, { recursive: true, force: true });
+  mkdirSync(STAGE, { recursive: true });
+  const top = execSync("git rev-parse --show-toplevel").toString().trim();
+  const tree = prefix ? `HEAD:${prefix.replace(/\/+$/, "")}` : "HEAD";
+  execSync(`set -o pipefail; git -C '${top}' archive --format=tar '${tree}' | tar -x -C '${STAGE}'`, { stdio: "inherit", shell: "/bin/bash" });
+  if (!existsSync(`${STAGE}/package-lock.json`)) { console.error(`✗ Couldn't stage the committed files in ${STAGE}`); process.exit(1); }
+  run("npm", ["ci", "--no-audit", "--no-fund", "--loglevel=error"], { cwd: STAGE, stdio: "inherit" });
+  run("npx", ["next", "build"], { cwd: STAGE, stdio: "inherit", env: { ...process.env, BUILD_ID: buildId, NEXT_TELEMETRY_DISABLED: "1" } });
+  rmSync("out", { recursive: true, force: true });
+  cpSync(`${STAGE}/out`, "out", { recursive: true });
 }
 if (!existsSync("out/index.html")) { console.error("✗ out/index.html missing — is output: 'export' set?"); process.exit(1); }
 

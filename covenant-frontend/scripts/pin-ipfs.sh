@@ -17,12 +17,22 @@ export IPFS_PATH=/var/lib/ipfs
 
 if ! command -v ipfs >/dev/null; then
   case "$(uname -m)" in x86_64) A=amd64 ;; aarch64|arm64) A=arm64 ;; *) echo "Unsupported CPU: $(uname -m)"; exit 1 ;; esac
-  V=$(curl -fsSL https://dist.ipfs.tech/kubo/versions | grep -vE -- '-(rc|beta|alpha)' | tail -1)
+  # dist.ipfs.tech first, GitHub releases as a fallback (some hosts can't reach dist)
+  C="curl -fsSL --connect-timeout 10 --max-time 300"
+  V=$($C https://dist.ipfs.tech/kubo/versions 2>/dev/null | grep -vE -- '-(rc|beta|alpha)' | tail -1 || true)
+  SRC=dist
+  if ! [[ "$V" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "dist.ipfs.tech not reachable, using GitHub releases"
+    SRC=github
+    V=$($C -o /dev/null -w '%{url_effective}' https://github.com/ipfs/kubo/releases/latest | sed 's#.*/tag/##')
+  fi
   [[ "$V" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Couldn't find the latest Kubo version"; exit 1; }
-  echo "Installing Kubo $V"
   F="kubo_${V}_linux-$A.tar.gz"
-  curl -fsSL -o "/tmp/$F" "https://dist.ipfs.tech/kubo/$V/$F"
-  SUM=$(curl -fsSL "https://dist.ipfs.tech/kubo/$V/$F.sha512" | awk '{print $1}')
+  if [ "$SRC" = dist ]; then U="https://dist.ipfs.tech/kubo/$V/$F"; else U="https://github.com/ipfs/kubo/releases/download/$V/$F"; fi
+  echo "Installing Kubo $V from $SRC"
+  $C -o "/tmp/$F" "$U"
+  SUM=$($C "$U.sha512" | awk '{print $1}')
+  [ -n "$SUM" ] || { echo "Couldn't get Kubo's checksum"; exit 1; }
   echo "$SUM  /tmp/$F" | sha512sum -c --quiet - || { echo "Kubo download failed its checksum"; exit 1; }
   tar -xzf "/tmp/$F" -C /tmp && install -m 755 /tmp/kubo/ipfs /usr/local/bin/ipfs && rm -rf "/tmp/$F" /tmp/kubo
 fi

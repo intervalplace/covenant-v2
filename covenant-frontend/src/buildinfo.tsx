@@ -42,11 +42,16 @@ export function BuildInfo() {
   }, []);
   if (!checked) return null;
   const commit = process.env.NEXT_PUBLIC_BUILD_ID;
+  const repo = process.env.NEXT_PUBLIC_REPO_URL?.replace(/\/+$/, "");
   return cid ? (
     <span title={`You're running the build with IPFS CID ${cid}. Nobody can change what this CID serves.`}>
       Build <a href={`https://${cid}.ipfs.dweb.link/`} target="_blank" rel="noreferrer" className="mono">{cid.slice(0, 10)}…{cid.slice(-6)}</a>
     </span>
   ) : commit ? (
-    <span title="Not served from IPFS. This is the source commit it was built from.">Build {commit}</span>
+    <span title="The source commit this site was built from. The same build is published on IPFS, where nobody can change it; the release list has its CID.">
+      Build {repo
+        ? <a href={`${repo}/blob/main/RELEASES.md`} target="_blank" rel="noreferrer" className="mono">{commit}</a>
+        : <span className="mono">{commit}</span>}
+    </span>
   ) : null;
 }

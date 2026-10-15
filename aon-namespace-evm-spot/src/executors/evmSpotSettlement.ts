@@ -1,0 +1,307 @@
+import {
+  createWalletClient,
+  createPublicClient,
+  http,
+  getAddress,
+  hashTypedData,
+  keccak256,
+  encodeAbiParameters,
+  decodeEventLog,
+  defineChain,
+  type Hex,
+} from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { evmSpotNamespace } from "../namespace.js";
+import { SETTLED_EVENT } from "../validators/objects.js";
+
+const legsOf = (o: any) => (((o?.payload as any)?.counterSet ?? []) as any[]).map((l) => ({ orderHash: l.orderHash as Hex, maxBase: BigInt(l.maxBase) }));
+const ZERO32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+// ── ABI ───────────────────────────────────────────────────────────────────────
+
+const abi = [
+  {
+    type: "function",
+    name: "settleSpotTrade",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "makerAuth", type: "tuple",
+        components: [
+          { name: "grantor",             type: "address" },
+          { name: "settlementContract",  type: "address" },
+          { name: "baseToken",           type: "address" },
+          { name: "quoteToken",          type: "address" },
+          { name: "marketId",            type: "bytes32" },
+          { name: "sideMask",            type: "uint8"   },
+          { name: "maxBaseExposure",     type: "uint256" },
+          { name: "maxQuoteExposure",    type: "uint256" },
+          { name: "maxExecutorFeeQuote", type: "uint256" },
+          { name: "minPrice",            type: "uint256" },
+          { name: "maxPrice",            type: "uint256" },
+          { name: "validAfter",          type: "uint64"  },
+          { name: "validBefore",         type: "uint64"  },
+          { name: "authNonce",           type: "bytes32" },
+        ],
+      },
+      { name: "makerAuthSig", type: "bytes" },
+      {
+        name: "makerOrder", type: "tuple",
+        components: [
+          { name: "trader",          type: "address" },
+          { name: "marketId",        type: "bytes32" },
+          { name: "side",            type: "uint8"   },
+          { name: "price",           type: "uint256" },
+          { name: "baseAmount",      type: "uint256" },
+          { name: "orderNonce",      type: "bytes32" },
+          { name: "sessionAuthHash", type: "bytes32" },
+          { name: "validAfter",      type: "uint64"  },
+          { name: "validBefore",     type: "uint64"  },
+          { name: "receiveNative",   type: "bool"    },
+          { name: "counterSetHash",  type: "bytes32" },
+          { name: "exclusiveBase",   type: "uint256" },
+          { name: "exclusiveUntil",  type: "uint64"  },
+        ],
+      },
+      { name: "makerOrderSig", type: "bytes" },
+      {
+        name: "takerAuth", type: "tuple",
+        components: [
+          { name: "grantor",             type: "address" },
+          { name: "settlementContract",  type: "address" },
+          { name: "baseToken",           type: "address" },
+          { name: "quoteToken",          type: "address" },
+          { name: "marketId",            type: "bytes32" },
+          { name: "sideMask",            type: "uint8"   },
+          { name: "maxBaseExposure",     type: "uint256" },
+          { name: "maxQuoteExposure",    type: "uint256" },
+          { name: "maxExecutorFeeQuote", type: "uint256" },
+          { name: "minPrice",            type: "uint256" },
+          { name: "maxPrice",            type: "uint256" },
+          { name: "validAfter",          type: "uint64"  },
+          { name: "validBefore",         type: "uint64"  },
+          { name: "authNonce",           type: "bytes32" },
+        ],
+      },
+      { name: "takerAuthSig", type: "bytes" },
+      {
+        name: "takerOrder", type: "tuple",
+        components: [
+          { name: "trader",          type: "address" },
+          { name: "marketId",        type: "bytes32" },
+          { name: "side",            type: "uint8"   },
+          { name: "price",           type: "uint256" },
+          { name: "baseAmount",      type: "uint256" },
+          { name: "orderNonce",      type: "bytes32" },
+          { name: "sessionAuthHash", type: "bytes32" },
+          { name: "validAfter",      type: "uint64"  },
+          { name: "validBefore",     type: "uint64"  },
+          { name: "receiveNative",   type: "bool"    },
+          { name: "counterSetHash",  type: "bytes32" },
+          { name: "exclusiveBase",   type: "uint256" },
+          { name: "exclusiveUntil",  type: "uint64"  },
+        ],
+      },
+      { name: "takerOrderSig", type: "bytes" },
+      {
+        name: "fill", type: "tuple",
+        components: [
+          { name: "makerOrderHash",         type: "bytes32" },
+          { name: "takerOrderHash",         type: "bytes32" },
+          { name: "makerAuthHash",          type: "bytes32" },
+          { name: "takerAuthHash",          type: "bytes32" },
+          { name: "price",                  type: "uint256" },
+          { name: "baseAmount",             type: "uint256" },
+          { name: "quoteAmount",            type: "uint256" },
+          { name: "executorFeeQuoteAmount", type: "uint256" },
+          { name: "fillNonce",              type: "bytes32" },
+          { name: "makerCounterSet",        type: "tuple[]", components: [{ name: "orderHash", type: "bytes32" }, { name: "maxBase", type: "uint256" }] },
+          { name: "takerCounterSet",        type: "tuple[]", components: [{ name: "orderHash", type: "bytes32" }, { name: "maxBase", type: "uint256" }] },
+        ],
+      },
+    ],
+    outputs: [],
+  },
+] as const;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function requireEnv(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`${name}_MISSING`);
+  return v;
+}
+
+function asHex(x: any, code: string): Hex {
+  if (typeof x !== "string" || !x.startsWith("0x")) throw new Error(code);
+  return x as Hex;
+}
+
+function authTuple(a: any) {
+  return {
+    grantor:             getAddress(a.grantor),
+    settlementContract:  getAddress(a.settlementContract),
+    baseToken:           getAddress(a.baseToken),
+    quoteToken:          getAddress(a.quoteToken),
+    marketId:            asHex(a.marketId,   "INVALID_MARKET_ID"),
+    sideMask:            Number(a.sideMask),
+    maxBaseExposure:     BigInt(a.maxBaseExposure),
+    maxQuoteExposure:    BigInt(a.maxQuoteExposure),
+    maxExecutorFeeQuote: BigInt(a.maxExecutorFeeQuote ?? 0),
+    minPrice:            BigInt(a.minPrice),
+    maxPrice:            BigInt(a.maxPrice),
+    validAfter:          BigInt(a.validAfter),
+    validBefore:         BigInt(a.validBefore),
+    authNonce:           asHex(a.authNonce, "INVALID_AUTH_NONCE"),
+  };
+}
+
+function orderTuple(o: any) {
+  return {
+    trader:          getAddress(o.trader),
+    marketId:        asHex(o.marketId,        "INVALID_ORDER_MARKET_ID"),
+    side:            Number(o.side),
+    price:           BigInt(o.price),
+    baseAmount:      BigInt(o.baseAmount),
+    orderNonce:      asHex(o.orderNonce,      "INVALID_ORDER_NONCE"),
+    sessionAuthHash: asHex(o.sessionAuthHash, "INVALID_SESSION_AUTH_HASH"),
+    validAfter:      BigInt(o.validAfter),
+    validBefore:     BigInt(o.validBefore),
+    receiveNative:   o.receiveNative === true,
+    counterSetHash:  (o.counterSetHash ?? ZERO32) as Hex,
+    exclusiveBase:   BigInt(o.exclusiveBase ?? 0),
+    exclusiveUntil:  BigInt(o.exclusiveUntil ?? 0),
+  };
+}
+
+// ── Executor ──────────────────────────────────────────────────────────────────
+
+export async function executeEvmSpotOnEvm(args: { graph: any }) {
+  const rpcUrl     = requireEnv("AON_EVM_RPC_URL");
+  const privateKey = asHex(requireEnv("AON_EXECUTOR_PRIVATE_KEY"), "INVALID_EXECUTOR_PRIVATE_KEY");
+
+  const graph = args.graph;
+
+  const makerAuth  = graph.makerAuthorization.payload.authorization;
+  const takerAuth  = graph.takerAuthorization.payload.authorization;
+  const makerOrder = graph.makerOrder.payload.order;
+  const takerOrder = graph.takerOrder.payload.order;
+  const fill       = graph.fill.payload.fill;
+
+  const makerAuthSig  = graph.makerAuthorization.signature?.signature;
+  const takerAuthSig  = graph.takerAuthorization.signature?.signature;
+  const makerOrderSig = graph.makerOrder.signature?.signature;
+  const takerOrderSig = graph.takerOrder.signature?.signature;
+
+  // Derive chain from the authorization's EIP-712 domain — ensures the executor
+  // submits to the same chain the parties signed for, not a hardcoded network.
+  const domain = graph.makerAuthorization.signature?.domain;
+  if (!domain) throw new Error("MISSING_EIP712_DOMAIN");
+
+  // M20: Assert both parties signed for the same chain before any network call
+  const takerDomain = graph.takerAuthorization.signature?.domain;
+  if (!takerDomain) throw new Error("MISSING_TAKER_EIP712_DOMAIN");
+  if (Number(domain.chainId) !== Number(takerDomain.chainId)) {
+    throw new Error(`CHAIN_ID_MISMATCH: maker=${domain.chainId} taker=${takerDomain.chainId}`);
+  }
+
+  const chainId = Number(domain.chainId);
+  const chain = defineChain({
+    id:             chainId,
+    name:           `evm-${chainId}`,
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+    rpcUrls:        { default: { http: [rpcUrl] } },
+  });
+
+  const account = privateKeyToAccount(privateKey);
+  const wallet  = createWalletClient({ account, chain, transport: http(rpcUrl) });
+  const pub     = createPublicClient({           chain, transport: http(rpcUrl) });
+
+  // The contract to call comes from what both parties signed, never from the
+  // (unsigned) fill. All sources must agree, and the executor can pin it.
+  const contract = getAddress(makerAuth.settlementContract);
+  const candidates = [takerAuth.settlementContract, domain.verifyingContract, takerDomain.verifyingContract, fill.settlementContract]
+    .filter(Boolean).map((x: string) => x.toLowerCase());
+  if (candidates.some((c) => c !== contract.toLowerCase())) throw new Error("SETTLEMENT_CONTRACT_MISMATCH");
+  const pinned = process.env.AON_EVM_SPOT_SETTLEMENT_CONTRACT;
+  if (pinned && pinned.toLowerCase() !== contract.toLowerCase()) throw new Error("SETTLEMENT_CONTRACT_NOT_ALLOWED");
+
+  // Recompute EIP-712 hashes for the fill instruction.
+  // The hashes stored in the AON fill payload are AON content-addressed hashes
+  // (used for graph traversal). The settlement contract needs EIP-712 hashes,
+  // which are a different hashing scheme derived from the auth/order structs.
+  const authTypes  = evmSpotNamespace.types();
+  const orderTypes = evmSpotNamespace.orderTypes();
+
+  const makerAuthEip712  = hashTypedData({ domain, types: authTypes,  primaryType: "TradingSessionAuthorization", message: makerAuth });
+  const takerAuthEip712  = hashTypedData({ domain, types: authTypes,  primaryType: "TradingSessionAuthorization", message: takerAuth });
+  const makerOrderEip712 = hashTypedData({ domain, types: orderTypes, primaryType: "SignedOrder",                 message: makerOrder });
+  const takerOrderEip712 = hashTypedData({ domain, types: orderTypes, primaryType: "SignedOrder",                 message: takerOrder });
+
+  const fillArg = {
+    makerOrderHash:         makerOrderEip712,
+    takerOrderHash:         takerOrderEip712,
+    makerAuthHash:          makerAuthEip712,
+    takerAuthHash:          takerAuthEip712,
+    price:                  BigInt(fill.price),
+    baseAmount:             BigInt(fill.baseAmount),
+    quoteAmount:            BigInt(fill.quoteAmount),
+    executorFeeQuoteAmount: BigInt(fill.executorFeeQuoteAmount ?? 0),
+    fillNonce:              asHex(fill.fillNonce, "INVALID_FILL_NONCE"),
+    // Published alongside each order; the contract checks them against the
+    // signed counterSetHash, so they can't be altered.
+    makerCounterSet:        legsOf(graph.makerOrder),
+    takerCounterSet:        legsOf(graph.takerOrder),
+  };
+
+  const tx = await wallet.writeContract({
+    address: contract,
+    abi,
+    functionName: "settleSpotTrade",
+    args: [
+      authTuple(makerAuth),  asHex(makerAuthSig,  "INVALID_MAKER_AUTH_SIG"),
+      orderTuple(makerOrder), asHex(makerOrderSig, "INVALID_MAKER_ORDER_SIG"),
+      authTuple(takerAuth),  asHex(takerAuthSig,  "INVALID_TAKER_AUTH_SIG"),
+      orderTuple(takerOrder), asHex(takerOrderSig, "INVALID_TAKER_ORDER_SIG"),
+      fillArg,
+    ],
+  });
+
+  const receipt = await pub.waitForTransactionReceipt({ hash: tx, confirmations: 1 });
+  // A reverted tx (e.g. another executor settled first) must not produce a receipt
+  if (receipt.status !== "success") throw new Error(`SETTLEMENT_REVERTED: ${tx}`);
+
+  const fillKey = keccak256(encodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }], [fillArg.fillNonce, makerOrderEip712, takerOrderEip712, fillArg.price, fillArg.baseAmount, fillArg.quoteAmount, fillArg.executorFeeQuoteAmount]));
+  // The contract settles as much of the fill as still fits, so the receipt
+  // reports the amounts from the event, not the ones submitted.
+  let settled: { baseAmount: string; quoteAmount: string; executorFeeQuoteAmount: string } | undefined;
+  for (const l of receipt.logs) {
+    if (l.address.toLowerCase() !== contract.toLowerCase()) continue;
+    try {
+      const ev: any = decodeEventLog({ abi: [SETTLED_EVENT], data: l.data, topics: l.topics as any });
+      if (String(ev.args.fillKey).toLowerCase() !== fillKey.toLowerCase()) continue;
+      settled = { baseAmount: String(ev.args.baseAmount), quoteAmount: String(ev.args.quoteAmount), executorFeeQuoteAmount: String(ev.args.executorFeeQuoteAmount) };
+    } catch {}
+  }
+  if (!settled) throw new Error(`SETTLEMENT_EVENT_MISSING: ${tx}`);
+
+  return {
+    executed:    true,
+    mode:        "contract",
+    executionTx: tx,
+    result:      "evm_spot_settlement_submitted",
+    details: {
+      settlementContract: contract,
+      executor:           account.address,
+      // Claims for the receipt; validateReceiptObject checks them on-chain
+      fillKey,
+      settled,
+      makerOrderHash:     makerOrderEip712,
+      takerOrderHash:     takerOrderEip712,
+      tx,
+      status:             receipt.status,
+      blockNumber:        receipt.blockNumber.toString(),
+      gasUsed:            receipt.gasUsed.toString(),
+    },
+  };
+}

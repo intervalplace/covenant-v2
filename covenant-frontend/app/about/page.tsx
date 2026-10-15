@@ -82,6 +82,13 @@ export default function About() {
         which is why this one spells out your terms in plain words before you
         sign, and your wallet shows the exact values before you approve.
       </p>
+      <p className="muted" style={{ marginTop: 12 }}>
+        Every release of this site is also published on IPFS, where its
+        address is a hash of the build itself, so nobody can change it or take
+        it down. If this domain ever went away, the app would still be there.
+        The footer shows which build you're running, and the release list in
+        the source repository links each one to its IPFS address.
+      </p>
 
       <h3 style={{ marginTop: 24 }}>Partial fills, enforced on-chain</h3>
       <p className="muted">

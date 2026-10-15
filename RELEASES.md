@@ -1,13 +1,13 @@
-# Covenant releases
+# Releases
 
-Each release is an immutable IPFS CID: it serves exactly that build, forever.
-Newest first. Open any of them through an IPFS gateway, e.g.
+Every release is the same build in two places: [covenant.market](https://covenant.market)
+and IPFS. Open a release by its CID through any IPFS gateway, e.g.
 `https://<CID>.ipfs.dweb.link`, or a local IPFS node: `ipfs://<CID>`.
+A CID can only ever serve that exact build. See [TRUST.md](TRUST.md) for how
+to check one.
+
+**Settlement contract (Ethereum mainnet):** `0x…` ([Etherscan](https://etherscan.io/address/0x…))
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
 | | | | | |
-
-Brand / link-preview bundle: _(CID from `npm run release:brand`)_
-
-Settlement contract (Ethereum mainnet): _(address, verified on Etherscan)_

@@ -1,0 +1,13 @@
+{
+  "name": "covenant-security-tests",
+  "private": true,
+  "type": "module",
+  "description": "Proof-of-concept tests for every issue found in the contract review rounds, plus the binding, self-settle and executor flows.",
+  "scripts": { "test": "./run.sh" },
+  "dependencies": {
+    "@intervalplace/aon-sdk": "0.1.0",
+    "solc": "0.8.26",
+    "tsx": "^4.19.2",
+    "viem": "^2.21.0"
+  }
+}

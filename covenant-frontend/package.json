@@ -8,8 +8,8 @@
     "start": "serve out -l 3000",
     "release:ipfs": "node scripts/release-ipfs.mjs",
     "rehearse": "tsx scripts/rehearse.mts",
-    "release:brand": "node scripts/release-brand.mjs",
-    "check-deploy": "node scripts/check-deploy.mjs"
+    "check-deploy": "node scripts/check-deploy.mjs",
+    "check-site": "node scripts/check-site.mjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-sans": "^5.3.0",

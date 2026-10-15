@@ -6,7 +6,7 @@ and IPFS. Open a release by its CID through any IPFS gateway, e.g.
 A CID can only ever serve that exact build. See [TRUST.md](TRUST.md) for how
 to check one.
 
-**Settlement contract (Ethereum mainnet):** `0x…` ([Etherscan](https://etherscan.io/address/0x…))
+**Settlement contract (Ethereum mainnet):** `0x2b563632192BD8Ccace85aEF14a33607C3a0193D` ([Etherscan](https://etherscan.io/address/0x2b563632192BD8Ccace85aEF14a33607C3a0193D)). Deployed in tx `0x66e21e58af57729393cf60bf7cd8efca50e8fd94d382382c8fdc3e34c5fb2bf3`.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|

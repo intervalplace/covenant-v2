@@ -66,7 +66,7 @@ the same book.
 | `covenant-executor` | A ready-to-run executor: settles matched trades and publishes receipts. |
 | `aon-namespace-evm-spot` | The `aon:evm-spot` namespace (order rules, validation, executor logic) and the settlement contract, `src/contracts/GenericEvmSpotSettlement.sol`. |
 | `security-tests` | Proof-of-concept tests for every issue found in review, plus the main flows. |
-| `deploy` | Compiler settings and Etherscan verification input for the contract. |
+| `deploy` | The contract's compiler settings, Etherscan verification input, and `deploy.html`: a one-page deployer for any EIP-1193 wallet (`node deploy/build-deploy-page.mjs` rebuilds it from the verification input). |
 
 ### Run the app locally
 

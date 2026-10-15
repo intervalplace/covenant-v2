@@ -10,4 +10,4 @@ to check one.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
-| | | | | |
+| v1.0.0 | `bafybeifbmybmztbqkkolzfchwq432jbjpzjjtvkx3oiqiexejtxbkizywe` | `56891a85072c` | 2026-10-16 | First release. ETH/USDT on Ethereum mainnet. |

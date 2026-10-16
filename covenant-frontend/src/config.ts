@@ -37,7 +37,8 @@ export const EXCLUSIVE_WINDOW_SECS = 300;
 export const MAX_ORDER_QUOTE = BigInt(process.env.NEXT_PUBLIC_MAX_ORDER_QUOTE || "0");
 
 // ETH left unwrapped when wrapping for a sell, so the wallet can still pay gas
-export const NATIVE_GAS_RESERVE = 10n ** 16n; // 0.01 ETH
+// (wrapping + approving is ~100k gas, well under 0.001 ETH at normal gas prices)
+export const NATIVE_GAS_RESERVE = 2n * 10n ** 15n; // 0.002 ETH
 
 // Validity windows
 export const MAKER_ORDER_TTL_SECS = 24 * 3600;

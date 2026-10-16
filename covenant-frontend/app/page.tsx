@@ -799,7 +799,7 @@ export default function Home() {
             <div>
               <label htmlFor="price">{side === "buy" ? "Highest price you'll pay" : "Lowest price you'll accept"}</label>
               <div className="field-unit">
-                <input id="price" inputMode="decimal" autoComplete="off" value={priceHuman} onChange={e => setPriceHuman(e.target.value)}
+                <input id="price" inputMode="decimal" autoComplete="off" value={priceHuman} onChange={e => setPriceHuman(e.target.value.replace(",", "."))}
                   placeholder={(side === "buy" ? asks[0] ?? bids[0] : bids[0] ?? asks[0]) ? priceToInput(market, (side === "buy" ? asks[0] ?? bids[0] : bids[0] ?? asks[0])!.price) : "0.00"} />
                 <span className="unit">{Q}</span>
               </div>
@@ -814,7 +814,7 @@ export default function Home() {
           <div>
             <label htmlFor="amount">Amount</label>
             <div className="field-unit">
-              <input id="amount" inputMode="decimal" autoComplete="off" value={amountHuman} onChange={e => setAmountHuman(e.target.value)} placeholder="0.00" />
+              <input id="amount" inputMode="decimal" autoComplete="off" value={amountHuman} onChange={e => setAmountHuman(e.target.value.replace(",", "."))} placeholder="0.00" />
               <span className="unit">{B}</span>
             </div>
             {isConnected && (

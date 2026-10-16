@@ -66,7 +66,7 @@ export const toPrice      = (m: Market, human: string) => parseUnits(clean(human
 export const quoteFor     = (base: bigint, price: bigint) => (base * price) / 10n ** 18n;
 
 function clean(x: string) {
-  const s = (x ?? "").trim();
+  const s = (x ?? "").trim().replace(",", "."); // decimal comma (e.g. Norwegian keyboards)
   if (!/^\d*\.?\d*$/.test(s) || s === "" || s === ".") throw new Error("INVALID_NUMBER");
   return s;
 }

@@ -127,6 +127,7 @@ export default function About() {
           {[
             ["AON Explorer", "https://explorer.aon.network", "View all objects on the live AON network"],
             ["AON on GitHub", "https://github.com/intervalplace/aon", "Node, SDK, namespaces"],
+            ["@covenantmarket on X", "https://x.com/covenantmarket", "The only official account: releases, release CIDs, status"],
           ].map(([label, href, desc]) => (
             <tr key={href}>
               <td style={{ paddingRight: 24, whiteSpace: "nowrap" }}><a href={href} target="_blank" rel="noreferrer">{label} ↗</a></td>

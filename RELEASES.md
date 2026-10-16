@@ -10,5 +10,6 @@ to check one.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
+| v1.0.2 | `bafybeihmbe3qm36sdmtp3t4qmbahrtiqzffkimnfq3gm4npghjvg45c5ya` | `180a5fb41481` | 2026-10-16 | After a trade settles, the message says so and links the Ethereum transaction and the AON receipt. |
 | v1.0.1 | `bafybeiev75crxbykzvjzhoesblehpl54yqkkrcrlbpp3iah5pngv75arpq` | `a675dee4ce01` | 2026-10-16 | Accepts decimal commas in price and amount; keeps 0.002 ETH for gas when selling (was 0.01). |
 | v1.0.0 | `bafybeifbmybmztbqkkolzfchwq432jbjpzjjtvkx3oiqiexejtxbkizywe` | `56891a85072c` | 2026-10-16 | First release. ETH/USDT on Ethereum mainnet. |

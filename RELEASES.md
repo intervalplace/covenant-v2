@@ -10,4 +10,5 @@ to check one.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
+| v1.0.1 | `bafybeickhasanwbjpvxt55py4lpb43kvx2xlejtxoqqwsoqk47pa7mwcua` | `32c71134b8d4` | 2026-10-16 | Accepts decimal commas in price and amount; keeps 0.002 ETH for gas when selling (was 0.01). |
 | v1.0.0 | `bafybeifbmybmztbqkkolzfchwq432jbjpzjjtvkx3oiqiexejtxbkizywe` | `56891a85072c` | 2026-10-16 | First release. ETH/USDT on Ethereum mainnet. |

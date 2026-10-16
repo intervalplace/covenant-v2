@@ -143,6 +143,9 @@ export default function Home() {
   const remember = (o: AonObject) => knownObjects.current.set(o.objectHash.toLowerCase(), o);
   const lookup = (h: string) => knownObjects.current.get(String(h).toLowerCase());
   const [lastFills, setLastFills] = useState<string[]>([]);
+  // The banner text shown right after placing an order, so it can switch to
+  // "settled" once those fills settle (and only while it's still showing)
+  const placedStatus = useRef<{ text: string; verb: string; rest: string } | null>(null);
   const [settling, setSettling] = useState<string | null>(null);
 
   const refreshing = useRef(false);
@@ -469,7 +472,11 @@ export default function Home() {
       const parts: string[] = [];
       if (m.filled > 0n) parts.push(`${side === "buy" ? "Bought" : "Sold"} ${fmtBase(market, m.filled)} ${B}, settling on Ethereum`);
       if (orderType === "limit" && m.remainder > 0n) parts.push(`${fmtBase(market, m.remainder)} ${B} resting at ${fmtPrice(market, price)}`);
-      setStatus(parts.join(". ") + ".");
+      const text = parts.join(". ") + ".";
+      placedStatus.current = m.filled > 0n
+        ? { text, verb: side === "buy" ? "Bought" : "Sold", rest: orderType === "limit" && m.remainder > 0n ? ` ${fmtBase(market, m.remainder)} ${B} resting at ${fmtPrice(market, price)}.` : "" }
+        : null;
+      setStatus(text);
       setLastFills(placedFills);
       setAmountHuman("");
       await refresh();
@@ -707,10 +714,30 @@ export default function Home() {
           <span className="muted">The order book may be out of date. Retrying automatically.</span>
         </div>
       )}
-      {status && (
-        <div className="banner banner-info" role="status">
-          <span>{status}</span>
-          {lastFills.some(h => fills.find(f => f.fillHash === h)?.status !== "settled") && (
+      {status && (() => {
+        // Once every fill from the order just placed has settled, say so and
+        // link the Ethereum transaction and the AON receipt.
+        const mine = lastFills.map(h => fills.find(f => f.fillHash === h));
+        const done = !!placedStatus.current && status === placedStatus.current.text
+          && mine.length > 0 && mine.every(f => f?.status === "settled");
+        const settled = mine.filter((f): f is NonNullable<typeof f> => !!f && f.status === "settled");
+        const base = settled.reduce((a, f) => a + f.baseAmount, 0n);
+        const quote = settled.reduce((a, f) => a + f.quoteAmount, 0n);
+        const many = settled.length > 1;
+        return (
+        <div className={done ? "banner banner-ok" : "banner banner-info"} role="status">
+          {done ? (
+            <span>
+              <strong>Settled.</strong> {placedStatus.current!.verb} {fmtBase(market, base)} {B} for {fmtQuote(market, quote)} {Q} on Ethereum.{placedStatus.current!.rest}
+              {settled.slice(0, 3).map((f, i) => (
+                <span key={f.fillHash}>
+                  {f.executionTx && <>{" "}<a href={etherscanTx(f.executionTx)} target="_blank" rel="noreferrer">Transaction{many ? ` ${i + 1}` : ""}</a></>}
+                  {f.receiptHash && <>{f.executionTx ? " · " : " "}<a href={`${EXPLORER}?hash=${f.receiptHash}`} target="_blank" rel="noreferrer">AON receipt{many ? ` ${i + 1}` : ""}</a></>}
+                </span>
+              ))}
+            </span>
+          ) : <span>{status}</span>}
+          {!done && lastFills.some(h => fills.find(f => f.fillHash === h)?.status !== "settled") && (
             <button className="btn-secondary" style={{ fontSize: 14, padding: "5px 12px" }} onClick={() => settleNow(lastFills)} disabled={!!loading}
               title="Send the settlement from your own wallet now instead of waiting for an executor. You pay the gas.">
               Settle now yourself
@@ -718,7 +745,8 @@ export default function Home() {
           )}
           <button className="link-btn" style={{ marginLeft: "auto" }} onClick={() => setStatus("")}>Dismiss</button>
         </div>
-      )}
+        );
+      })()}
 
       {/* Market bar */}
       <div className="market-bar">

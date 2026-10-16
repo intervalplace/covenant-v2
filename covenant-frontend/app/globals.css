@@ -207,6 +207,8 @@ button:disabled { opacity: 0.45; cursor: default; }
 .banner-warn   { background: var(--warn-soft); border-color: #EBD9B4; }
 .banner-danger { background: var(--sell-soft); border-color: #EFC9C6; }
 .banner-info   { background: var(--blue-soft); border-color: #CDD6F6; }
+.banner-ok     { background: var(--buy-soft); border-color: #BFE0D3; }
+.banner a { white-space: nowrap; }
 
 /* ── Market bar ────────────────────────────────────────────────────────────── */
 .market-bar {

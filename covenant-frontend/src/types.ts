@@ -94,6 +94,7 @@ export type FillView = {
   quoteAmount:  bigint;
   status:       FillStatus;
   executionTx?: string;
+  receiptHash?: string;        // the AON receipt object, once an executor (or the trader) published one
   createdAt:    number;
   settledAt?:   number;
 };

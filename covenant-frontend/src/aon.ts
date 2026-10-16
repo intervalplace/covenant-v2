@@ -304,6 +304,7 @@ export async function deriveState(
       quoteAmount: base === BigInt(d.baseAmount) ? BigInt(d.quoteAmount) : quoteFor(base, BigInt(d.price)),
       status,
       executionTx: settled ? receipt?.payload?.executionTx : undefined,
+      receiptHash: settled ? receipt?.objectHash : undefined,
       createdAt:   f.createdAt,
       settledAt:   receipt?.createdAt,
     });

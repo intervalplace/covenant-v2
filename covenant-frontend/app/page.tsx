@@ -151,6 +151,7 @@ export default function Home() {
   const refreshing = useRef(false);
   const refreshAgain = useRef(false);
   const usedNonceCache = useRef(new Set<string>()); // consumed nonces never un-consume
+  const checkedOldFills = useRef(new Set<string>()); // fills older than a week: checked once per visit
 
   const refresh = useCallback(async () => {
     if (refreshing.current) { refreshAgain.current = true; return; }
@@ -166,10 +167,18 @@ export default function Home() {
           pc.readContract({ address: SETTLEMENT_CONTRACT, abi: evmSpotSettlementAbi, functionName, args: [arg] } as any);
 
         // 1. Which fills has the contract actually settled? (source of truth)
+        // Recent fills are re-checked every refresh; older ones once per visit
+        // (settled ones are then cached), so old trades stay in the history.
         const weekAgo = Date.now() - 7 * 86400e3;
-        const unknown = state.fills.filter(f => f.createdAt > weekAgo && !usedNonceCache.current.has(f.fillKey.toLowerCase()));
+        const unknown = state.fills.filter(f => {
+          const k = f.fillKey.toLowerCase();
+          return !usedNonceCache.current.has(k) && (f.createdAt > weekAgo || !checkedOldFills.current.has(k));
+        });
         await Promise.all(unknown.map(async f => {
-          if (await read("usedFill", f.fillKey).catch(() => false)) usedNonceCache.current.add(f.fillKey.toLowerCase());
+          const k = f.fillKey.toLowerCase();
+          const used = await read("usedFill", f.fillKey).catch(() => null);
+          if (used) usedNonceCache.current.add(k);
+          if (used !== null && f.createdAt <= weekAgo) checkedOldFills.current.add(k);
         }));
 
         // 2. Per-order fill totals (also catches fills settled outside AON)

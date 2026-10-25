@@ -10,6 +10,7 @@ to check one.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
+| v1.0.4 | `bafybeie27whot7pc6r2r4t6jeia6zx5vby6ckttzc3wjjp5hkmjoqxx3ga` | `b9cd061764b2` | 2026-10-25 | Approves exact amounts (the order plus your other open orders), never unlimited. Trades older than a week stay in Recent trades and Trade history. |
 | v1.0.3 | `bafybeihgyrttb6duurrh6iksp7no4yz2mea3ubfprdb4olf4jvwlmn7dbq` | `dbe49f006582` | 2026-10-16 | Links the official @covenantmarket account in the footer and on the About page. |
 | v1.0.2 | `bafybeihmbe3qm36sdmtp3t4qmbahrtiqzffkimnfq3gm4npghjvg45c5ya` | `180a5fb41481` | 2026-10-16 | After a trade settles, the message says so and links the Ethereum transaction and the AON receipt. |
 | v1.0.1 | `bafybeiev75crxbykzvjzhoesblehpl54yqkkrcrlbpp3iah5pngv75arpq` | `a675dee4ce01` | 2026-10-16 | Accepts decimal commas in price and amount; keeps 0.002 ETH for gas when selling (was 0.01). |

@@ -292,6 +292,17 @@ export default function Home() {
   const wrapNeeded = side === "sell" && isEthMarket && preview && preview.orderBase > baseAvail ? preview.orderBase - baseAvail : 0n;
   const receiveNative = side === "buy" && isEthMarket && canReceiveNative && !preferWeth;
   const payAllow  = side === "buy" ? quoteAllowance : baseAllowance;
+  // What my open orders (and their fills awaiting settlement) can still pull
+  // from my wallet in this token. Approvals are exact, so a new order's
+  // approval has to cover these too or they'd stop being fillable.
+  const committedIn = (tokenAddr: string) => orders
+    .filter(o => o.maker.toLowerCase() === me && !o.cancelled && !o.expired
+      && (o.side === "sell" ? o.market.base : o.market.quote).address.toLowerCase() === tokenAddr.toLowerCase())
+    .reduce((sum, o) => {
+      const open = o.remaining + o.pending;
+      return sum + (o.side === "sell" ? open : quoteFor(open, o.price) + o.feeBudgetLeft);
+    }, 0n);
+  const approveTarget = preview ? committedIn(payToken.address) + preview.need : 0n;
 
   const problem = (() => {
     if (!preview) return null;
@@ -361,8 +372,12 @@ export default function Home() {
     return address;
   }
 
+  // Approves exactly what's needed (this order plus my other open orders in
+  // the token), never an unlimited amount: if the contract ever had a bug, it
+  // could only reach what's actually up for trading.
   async function ensureAllowance(token: Token, needed: bigint) {
     if (DEMO_MODE || !address || !publicClient || needed === 0n) return;
+    needed += committedIn(token.address);
     const current = await publicClient.readContract({
       address: token.address, abi: erc20Abi, functionName: "allowance", args: [address, SETTLEMENT_CONTRACT],
     }) as bigint;
@@ -373,11 +388,11 @@ export default function Home() {
       const tx0 = await writeContractAsync({ address: token.address, abi: erc20Abi, functionName: "approve", args: [SETTLEMENT_CONTRACT, 0n] });
       await publicClient.waitForTransactionReceipt({ hash: tx0 });
     }
-    setLoading(`Approve ${token.symbol} in your wallet...`);
-    const tx = await writeContractAsync({ address: token.address, abi: erc20Abi, functionName: "approve", args: [SETTLEMENT_CONTRACT, maxUint256] });
+    setLoading(`Approve ${fmt(needed, token.decimals)} ${token.symbol} in your wallet...`);
+    const tx = await writeContractAsync({ address: token.address, abi: erc20Abi, functionName: "approve", args: [SETTLEMENT_CONTRACT, needed] });
     setLoading(`Waiting for ${token.symbol} approval...`);
     await publicClient.waitForTransactionReceipt({ hash: tx });
-    addLog(`${token.symbol} approved for the settlement contract.`);
+    addLog(`Approved ${fmt(needed, token.decimals)} ${token.symbol} for the settlement contract.`);
     refetchReads();
   }
 
@@ -880,8 +895,8 @@ export default function Home() {
                 {baseAvail > 0n ? `${fmt(baseAvail, 18)} WETH and ${fmt(wrappable, 18)} ETH` : "All ETH"}, keeping {fmt(NATIVE_GAS_RESERVE, 18)} ETH for gas
               </div>
             )}
-            {isConnected && preview && payAllow < preview.need && (
-              <div className="faint">First trade with {payToken.symbol}: your wallet will ask you to approve it once.</div>
+            {isConnected && preview && payAllow < approveTarget && (
+              <div className="faint">Your wallet will ask you to approve {fmt(approveTarget, payToken.decimals)} {payToken.symbol}: exactly what your open orders can use, never more.</div>
             )}
           </div>
 

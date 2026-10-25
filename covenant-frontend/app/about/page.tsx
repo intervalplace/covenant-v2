@@ -40,7 +40,7 @@ export default function About() {
 
       <h2>How a trade works</h2>
       <ol style={{ paddingLeft: 22, color: "var(--muted)", lineHeight: 2.1, marginTop: 14 }}>
-        <li>Choose a market, a side, a price and an amount. The first time, you approve the token for the settlement contract.</li>
+        <li>Choose a market, a side, a price and an amount. If needed, you approve exactly the amount your orders can use, never an unlimited amount.</li>
         <li>You sign two messages, with no gas: an authorization that caps what the order can spend, and the order itself.</li>
         <li>If your price crosses the book, the order fills right away against the best prices first, at each resting order's price.</li>
         <li>Whatever doesn't fill rests on the book as a limit order until it fills, you cancel it, or it expires after 24 hours. Market orders never rest.</li>
@@ -63,7 +63,8 @@ export default function About() {
       <p className="muted">
         Tokens are never deposited. They move straight from seller to buyer at the
         moment of settlement. Your approval lets the settlement contract move tokens
-        only when it has a valid signed order from you.
+        only when it has a valid signed order from you, and only up to the
+        amount you approved for your open orders.
       </p>
 
       <h3 style={{ marginTop: 24 }}>No operator</h3>

@@ -6,7 +6,7 @@
  * with no Chainlink feed simply get no reference — nothing is hardcoded that
  * could point at the wrong feed.
  *
- * Prices are converted from USD to USDT with Chainlink's USDT/USD feed, so the
+ * Prices are converted from USD to the quote stablecoin with its Chainlink USD feed, so the
  * reference is in the market's own quote currency.
  */
 
@@ -41,11 +41,11 @@ const MAX_HISTORY_ROUNDS = 120;
 
 export type RefPoint = { t: number; price: number };          // t = unix ms, price in quote per base
 export type Reference = {
-  price:     number;        // latest, in the market's quote currency (USDT)
+  price:     number;        // latest, in the market's quote currency
   updatedAt: number;        // unix ms
   stale:     boolean;
   history:   RefPoint[];    // oldest first, covering the last 24h
-  quoteIsUsd: boolean;      // true if the USDT/USD conversion wasn't available
+  quoteIsUsd: boolean;      // true if the stablecoin/USD conversion wasn't available
 };
 
 type Round = { id: bigint; answer: bigint; updatedAt: bigint };
@@ -99,10 +99,11 @@ export function getReference(pc: PublicClient, m: Market, maxAgeMs = 60_000): Pr
     let px: Round & { decimals: number };
     try { px = await latest(pc, base, DENOM.USD); } catch { return null; } // no Chainlink feed for this asset
 
-    // USD -> USDT
+    // USD -> the stablecoin quoted (USDC or USDT)
     let usdt: (Round & { decimals: number }) | null = null;
-    if (m.quote.address.toLowerCase() === TOKENS.USDT.address.toLowerCase()) {
-      usdt = await latest(pc, TOKENS.USDT.address, DENOM.USD).catch(() => null);
+    const q = m.quote.address.toLowerCase();
+    if (q === TOKENS.USDT.address.toLowerCase() || q === TOKENS.USDC.address.toLowerCase()) {
+      usdt = await latest(pc, m.quote.address, DENOM.USD).catch(() => null);
     }
     const usdtPerUsd = usdt && usdt.answer > 0n ? 1 / toNum(usdt.answer, usdt.decimals) : 1;
 

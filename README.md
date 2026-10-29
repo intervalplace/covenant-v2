@@ -2,7 +2,7 @@
 
 **Execution no longer requires trust.**
 
-An order book without the exchange. Trade ETH for USDT on Ethereum from your
+An order book without the exchange. Trade ETH for USDC on Ethereum from your
 own wallet: limit and market orders, a live order book, partial fills. There
 are no deposits, no accounts and no backend. Your tokens stay in your wallet
 until a trade settles, and they only ever move on terms you signed.
@@ -29,7 +29,7 @@ Your wallet ── signs an order (free, no gas) ──▶ AON (an open network 
           swaps the tokens wallet to wallet in one transaction
 ```
 
-1. An order is a message you sign: "sell up to 0.5 ETH at 3,010 USDT or
+1. An order is a message you sign: "sell up to 0.5 ETH at 3,010 USDC or
    better, for 24 hours". It's published to [AON](https://aon.network), and
    your tokens don't move.
 2. When a new order crosses one in the book, your browser does the matching
@@ -108,7 +108,7 @@ contract against real WETH, USDT and Chainlink on a local mainnet fork.
 
 ## Technical notes
 
-- **Markets.** ETH/USDT is listed. LINK/USDT and QNT/USDT are defined
+- **Markets.** ETH/USDC is listed (ETH/USDT was the launch market). LINK/USDC and QNT/USDC are defined
   (`NEXT_PUBLIC_MARKETS`). The contract assumes an 18-decimal base token.
 - **Native ETH.** Buyers receive native ETH: the contract unwraps WETH during
   settlement. Wallets that are contracts get WETH. Sellers' ETH is wrapped

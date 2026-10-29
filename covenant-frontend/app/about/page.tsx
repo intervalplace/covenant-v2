@@ -11,7 +11,7 @@ export default function About() {
         Execution no longer requires trust.
       </h1>
       <p className="muted">
-        Covenant is an order book for trading ETH against USDT on
+        Covenant is an order book for trading ETH against USDC on
         Ethereum, with no backend, no database and no custody. It works like the
         order book you know from any exchange. The difference is that there is
         no exchange. Covenant is one example interface on AON: the orders,
@@ -25,7 +25,7 @@ export default function About() {
       <p className="muted">
         On a normal exchange you deposit funds and the exchange matches orders in
         its own database. On Covenant nothing is deposited. An order is a message
-        you sign in your wallet: "I will sell up to 0.5 ETH at 3,010 USDT or better,
+        you sign in your wallet: "I will sell up to 0.5 ETH at 3,010 USDC or better,
         for the next 24 hours." That message is published to AON, a peer-to-peer
         network, and your tokens stay in your wallet.
       </p>

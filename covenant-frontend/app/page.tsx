@@ -26,6 +26,7 @@ import { erc20Abi, wethAbi, evmSpotSettlementAbi } from "@/abi";
 import type { AonObject, RestingOrder, FillView, Log, Side } from "@/types";
 import { finalizeObject } from "@intervalplace/aon-sdk";
 import { Arc } from "@/arc";
+import { MarketTabs } from "@/market-tabs";
 import { getReference, deviation, type Reference } from "@/reference";
 
 const finalize = (o: any) => finalizeObject(o as any) as any as AonObject;
@@ -130,7 +131,7 @@ export default function Home() {
   }, [address, publicClient]);
 
   const demo = (d: number) => 10_000n * 10n ** BigInt(d);
-  // Demo wallet: plain ETH and no WETH on ETH/USDT, so the wrap step shows up
+  // Demo wallet: plain ETH and no WETH on ETH/USDC, so the wrap step shows up
   const baseBalance    = !isConnected ? 0n : DEMO_MODE ? (market.base.wrapsNative ? 0n : demo(market.base.decimals)) : (readsEnabled ? (reads?.[0]?.result ?? 0n) : 0n);
   const baseAllowance  = DEMO_MODE ? maxUint256 : (readsEnabled ? (reads?.[1]?.result ?? 0n) : 0n);
   const quoteBalance   = !isConnected ? 0n : DEMO_MODE ? demo(market.quote.decimals) : (readsEnabled ? (reads?.[2]?.result ?? 0n) : 0n);
@@ -700,7 +701,7 @@ export default function Home() {
           <div className="hero-arc"><Arc width={500} sagitta={17} thickness={1.5} draw style={{ width: "100%", height: "auto" }} /></div>
           <h1 className="hero-title">Execution no longer requires trust.</h1>
           <p className="hero-sub">
-            Trade ETH for USDT from your own wallet. Nobody holds your
+            Trade ETH for USDC from your own wallet. Nobody holds your
             funds. They move only when your exact terms are met, in a single
             Ethereum transaction.
           </p>
@@ -775,7 +776,7 @@ export default function Home() {
       {/* Market bar */}
       <div className="market-bar">
         {MARKETS.length === 1 ? (
-          <h2 className="market-title">{market.label}</h2>
+          <MarketTabs active={market.key} />
         ) : (
         <div className="market-tabs" role="tablist" aria-label="Market">
           {MARKETS.map(m => (

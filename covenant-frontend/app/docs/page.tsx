@@ -31,10 +31,10 @@ export default function Docs() {
 
       <h2>Markets</h2>
       <p className="muted" style={{ marginTop: 12 }}>
-        ETH/USDT on Ethereum mainnet, with more pairs to follow. Token addresses are
-        fixed in the interface. On ETH/USDT, buy orders are paid out in native
+        ETH/USDC on Ethereum mainnet, with more pairs to follow. Token addresses are
+        fixed in the interface. On ETH/USDC, buy orders are paid out in native
         ETH: the contract unwraps WETH during settlement. Orders must be worth
-        at least 25 USDT, so settlement gas stays a small part of each trade. Sellers need WETH,
+        at least 25 USDC, so settlement gas stays a small part of each trade. Sellers need WETH,
         because a signed order can't pull native ETH from a wallet, so the
         interface wraps it as a step before signing. All markets run on the
         generic {code("aon:evm-spot")} namespace and settle through one
@@ -102,7 +102,7 @@ export default function Docs() {
       <p className="muted" style={{ marginTop: 12 }}>
         The market price shown next to each book comes from Chainlink's price
         feeds, read directly from Ethereum through the Chainlink Feed Registry
-        and converted from USD to USDT with Chainlink's USDT/USD feed. It is a
+        and converted from USD to USDC with Chainlink's USDC/USD feed. It is a
         reference only; Covenant trades at whatever prices traders sign.
       </p>
       <p className="muted" style={{ marginTop: 12 }}>

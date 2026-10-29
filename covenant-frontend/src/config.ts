@@ -22,7 +22,7 @@ export const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 // fill's share of the order, so a fee is always a percentage, never a flat cut.
 export const EXECUTOR_FEE_BPS = BigInt(process.env.NEXT_PUBLIC_EXECUTOR_FEE_BPS || "0");
 
-// Minimum order size in quote units (default 25 USDT). Settlement is a mainnet
+// Minimum order size in quote units (default 25 USDC). Settlement is a mainnet
 // transaction, so tiny orders would cost more in gas than they're worth.
 export const MIN_ORDER_QUOTE = BigInt(process.env.NEXT_PUBLIC_MIN_ORDER_QUOTE || "25000000");
 
@@ -54,7 +54,16 @@ export type Token = {
   wrapsNative?: boolean; // WETH: offer an ETH → WETH wrap
 };
 
-const env = (k: string, fallback: string) => (process.env[k] || fallback) as Address;
+// Next.js only inlines process.env.NEXT_PUBLIC_* written out literally, so each
+// override is read by name here (process.env[k] would be empty in the browser).
+const OVERRIDES: Record<string, string | undefined> = {
+  NEXT_PUBLIC_WETH_ADDRESS: process.env.NEXT_PUBLIC_WETH_ADDRESS,
+  NEXT_PUBLIC_LINK_ADDRESS: process.env.NEXT_PUBLIC_LINK_ADDRESS,
+  NEXT_PUBLIC_QNT_ADDRESS:  process.env.NEXT_PUBLIC_QNT_ADDRESS,
+  NEXT_PUBLIC_USDT_ADDRESS: process.env.NEXT_PUBLIC_USDT_ADDRESS,
+  NEXT_PUBLIC_USDC_ADDRESS: process.env.NEXT_PUBLIC_USDC_ADDRESS,
+};
+const env = (k: keyof typeof OVERRIDES, fallback: string) => (OVERRIDES[k] || fallback) as Address;
 
 // Mainnet addresses. Override per token for local/test deployments
 // (keep the same decimals when overriding).
@@ -67,13 +76,15 @@ export const TOKENS = {
           address: env("NEXT_PUBLIC_QNT_ADDRESS",  "0x4a220E6096B25EADb88358cb44068A3248254675") },
   USDT: { symbol: "USDT", name: "Tether USD",    decimals: 6,
           address: env("NEXT_PUBLIC_USDT_ADDRESS", "0xdAC17F958D2ee523a2206206994597C13D831ec7") },
+  USDC: { symbol: "USDC", name: "USD Coin",      decimals: 6,
+          address: env("NEXT_PUBLIC_USDC_ADDRESS", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48") },
 } satisfies Record<string, Token>;
 
 // ── Markets ───────────────────────────────────────────────────────────────────
 
 export type Market = {
-  key:     string;  // stable UI key, e.g. "ETH-USDT"
-  label:   string;  // "ETH / USDT"
+  key:     string;  // stable UI key, e.g. "ETH-USDC"
+  label:   string;  // "ETH / USDC"
   base:    Token;
   quote:   Token;
   marketId: Hex;    // bytes32, deterministic from chain + token addresses
@@ -99,14 +110,15 @@ function market(base: Token, quote: Token, note?: string): Market {
 // NOTE: the settlement contract prices in quote-per-base scaled by 1e18 and
 // assumes an 18-decimal base token. Only add markets whose base has 18 decimals.
 const ALL_MARKETS: Market[] = [
+  market(TOKENS.WETH, TOKENS.USDC, "Trade with plain ETH. Buys pay out real ETH; when you sell, any ETH that needs wrapping is wrapped as part of the order."),
   market(TOKENS.WETH, TOKENS.USDT, "Trade with plain ETH. Buys pay out real ETH; when you sell, any ETH that needs wrapping is wrapped as part of the order."),
-  market(TOKENS.LINK, TOKENS.USDT),
-  market(TOKENS.QNT,  TOKENS.USDT),
+  market(TOKENS.LINK, TOKENS.USDC),
+  market(TOKENS.QNT,  TOKENS.USDC),
 ];
 
 // Which markets are listed, by key. Launch with one busy book; add more later
-// with NEXT_PUBLIC_MARKETS=ETH-USDT,LINK-USDT (no contract change needed).
-const listed = (process.env.NEXT_PUBLIC_MARKETS || "ETH-USDT").split(",").map(s => s.trim().toUpperCase());
+// with NEXT_PUBLIC_MARKETS=ETH-USDC,LINK-USDC (no contract change needed).
+const listed = (process.env.NEXT_PUBLIC_MARKETS || "ETH-USDC").split(",").map(s => s.trim().toUpperCase());
 export const MARKETS: Market[] = ALL_MARKETS.filter(m => listed.includes(m.key.toUpperCase()));
 if (MARKETS.length === 0) MARKETS.push(ALL_MARKETS[0]);
 

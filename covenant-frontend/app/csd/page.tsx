@@ -467,14 +467,14 @@ export default function CsdMarketPage() {
           ) : (
             <div className="col" style={{ gap: 14 }}>
               <div>
-                <div className="stat-label">Balance</div>
-                <div className="stat" style={{ fontSize: 26 }}>{csd.loaded ? fmtCsd(csd.balance) : "…"} <span className="muted" style={{ fontSize: 15 }}>CSD</span></div>
+                <div className="stat-label">CSD</div>
+                <div className="stat" style={{ fontSize: 22 }}>{csd.loaded ? fmtCsd(csd.balance) : "…"}</div>
                 {incoming > 0n && <div className="faint">+{fmtCsd(incoming)} CSD arriving</div>}
                 {mid !== null && csd.balance > 0n && <div className="faint">≈ {fmtUsdc((csd.balance * mid) / 100_000_000n)} USDC</div>}
               </div>
               <div>
                 <div className="stat-label">USDC</div>
-                <div className="stat" style={{ fontSize: 20 }}>{usdcBal === null ? "…" : fmtUsdc(usdcBal)}</div>
+                <div className="stat" style={{ fontSize: 22 }}>{usdcBal === null ? "…" : fmtUsdc(usdcBal)}</div>
               </div>
               <div>
                 <div className="stat-label">Receive</div>

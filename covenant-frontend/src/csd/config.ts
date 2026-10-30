@@ -16,9 +16,10 @@ export const CSD_NODE_URL = (process.env.NEXT_PUBLIC_CSD_NODE_URL ?? "").replace
 // can't get you to accept cheaply faked CSD blocks. Rebuild if CSD's
 // difficulty falls by more than half.
 export const CSD_TARGET_REF = (() => { try { return BigInt(process.env.NEXT_PUBLIC_CSD_TARGET_REF || "0"); } catch { return 0n; } })();
-// The market makers whose offers on AON this site trades with (their offers and responses must carry their signature)
+// Market makers this site already knows (optional). Anyone can be one: the page finds every maker's
+// signed offers on AON; these only help it find theirs first.
 export const CSD_MARKET_MAKERS = (process.env.NEXT_PUBLIC_CSD_MARKET_MAKERS ?? "").split(",").map(s => s.trim()).filter(s => /^0x[0-9a-fA-F]{40}$/.test(s));
-export const CSD_ENABLED = !!CSD_MM_URL && !!CSD_SETTLEMENT && CSD_MARKET_MAKERS.length > 0 && (CSD_TARGET_REF > 0n || !!CSD_NODE_URL);
+export const CSD_ENABLED = !!CSD_MM_URL && !!CSD_SETTLEMENT && (CSD_TARGET_REF > 0n || !!CSD_NODE_URL);
 // Confirmations the market maker must prove before it is paid for CSD you buy.
 // Only it waits; deeper makes a faked payment more expensive.
 export const CSD_BUY_CONFIRMATIONS = 20n;

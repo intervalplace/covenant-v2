@@ -5,6 +5,8 @@ const code = (t: string) => (
   <code style={{ fontFamily: "var(--mono)", fontSize: 14, background: "#f6f6f6", padding: "1px 5px", border: "1px solid #ddd" }}>{t}</code>
 );
 
+const REPO_CSD = "https://github.com/intervalplace/aon-namespace-csd-usdc";
+
 export default function Docs() {
   return (
     <main className="prose" style={{ maxWidth: 720, margin: "0 auto", padding: "56px 24px 24px" }}>
@@ -46,24 +48,28 @@ export default function Docs() {
       <h2 id="csd">CSD/USDC</h2>
       <p className="muted" style={{ marginTop: 12 }}>
         Compute Substrate (CSD) runs on its own blockchain, so it can&apos;t sit in an
-        Ethereum wallet. You trade it with a market maker, settled by the
+        Ethereum wallet. You trade it with market makers, settled by the
         {" "}{code("CsdUsdcSettlement")} contract on Ethereum, with objects in the
-        {" "}{code("aon:csd-usdc")} namespace. Prices come from the market maker&apos;s
-        pool: buying moves the price up, selling moves it down. Trades are 1–30 USDC for now.
+        {" "}{code("aon:csd-usdc")} namespace. Each market maker prices from its own
+        pool: buying moves its price up, selling moves it down. Trades are 1–30 USDC for now.
       </p>
       <p className="muted" style={{ marginTop: 10 }}>
-        The whole trade happens on AON. The market maker publishes signed offers;
-        your signed authorization (or sale request, then payment) is published
-        referencing the offer; the market maker answers with signed responses and
-        a receipt. The page only accepts offers and answers signed by the market
-        maker&apos;s address, and anyone can follow a trade on the explorer.
+        The market is open: anyone can be a market maker, with their own funds, by
+        publishing signed offers on AON. The page finds every maker&apos;s offers,
+        shows them as one order book and sends your trade to the best price. You
+        never have to trust a maker: your USDC only reaches one with a proof that
+        it paid you the CSD, and your CSD only leaves your wallet once its USDC is
+        locked for you. The whole trade happens on AON (your authorization or sale
+        request, the maker&apos;s signed answers, the receipt), so anyone can follow
+        it on the explorer.{" "}
+        <a href={`${REPO_CSD}/blob/main/docs/market-maker.md#run-your-own`} target="_blank" rel="noreferrer">Run a market maker</a>
       </p>
 
       <h3 id="csd-wallet" style={{ marginTop: 24 }}>Your CSD wallet</h3>
       <p className="muted" style={{ marginTop: 10 }}>
         The page gives you a CSD wallet of your own. Its keys are made from a
         signature by your Ethereum wallet and stay in your browser: Covenant and
-        the market maker never have them and can&apos;t move your CSD. The same
+        market makers never have them and can&apos;t move your CSD. The same
         Ethereum wallet opens the same CSD wallet on any device, and
         &quot;Forget on this device&quot; removes it from the browser.
       </p>

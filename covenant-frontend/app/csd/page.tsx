@@ -108,6 +108,7 @@ const poolOf = (o: any): Pool => ({ usdc: BigInt(o.payload.poolUsdc), csd: BigIn
 const AVOID_KEY = "covenant.csd.avoid";
 const avoid = new Map<string, number>((() => { try { return Object.entries(JSON.parse(localStorage.getItem(AVOID_KEY) ?? "{}")) as [string, number][]; } catch { return []; } })());
 function skipMaker(addr: string, ms = 30 * 60_000) {
+  forgetProven(addr);
   avoid.set(addr.toLowerCase(), Date.now() + ms);
   try { localStorage.setItem(AVOID_KEY, JSON.stringify(Object.fromEntries([...avoid].filter(([, t]) => t > Date.now())))); } catch {}
 }
@@ -115,38 +116,48 @@ function skipMaker(addr: string, ms = 30 * 60_000) {
 // on chain), or if the site lists it. Trades go to proven makers; a new maker gets orders after its
 // first settled trade, so a fake maker with tempting prices costs more than an address.
 type Reader = (txHash: Hex) => Promise<{ logs: { address: string; data: Hex; topics: Hex[] }[] } | null>;
+// Only a settlement proven with a CSD payment counts (an early release needs no CSD at all, so two
+// addresses of one person could make any number of those for the price of gas)
 const SETTLED_EVENTS = [
   parseAbiItem("event CsdUsdcSettled(bytes32 indexed authHash, bytes32 indexed csdTxid, address indexed buyer, address sellerUsdcRecipient, address usdc, uint256 usdcAmount, uint256 csdAmount)"),
-  parseAbiItem("event CsdUsdcReleasedEarly(bytes32 indexed authHash, bytes32 indexed csdTxid, address indexed buyer, address sellerUsdcRecipient, address usdc, uint256 usdcAmount, uint256 csdAmount)"),
 ];
+const RELEASED_EARLY = parseAbiItem("event CsdUsdcReleasedEarly(bytes32 indexed authHash, bytes32 indexed csdTxid, address indexed buyer, address sellerUsdcRecipient, address usdc, uint256 usdcAmount, uint256 csdAmount)");
 // A receipt is real if the transaction it names settled exactly that trade on the contract, the
 // maker who signed it was a party to it, and the amounts match. (Checked once per receipt.)
-const verified = new Map<string, boolean>(); // receipt hash → real
-async function realReceipt(o: any, read: Reader): Promise<boolean> {
+const verified = new Map<string, "settled" | "released" | null>(); // receipt hash → how it really settled
+async function realReceipt(o: any, read: Reader): Promise<"settled" | "released" | null> {
   if (verified.has(o.objectHash)) return verified.get(o.objectHash)!;
-  let ok = false;
+  let ok: "settled" | "released" | null = null;
   try {
     const rc = /^0x[0-9a-fA-F]{64}$/.test(String(o.payload?.executionTx)) ? await read(o.payload.executionTx) : null;
     for (const l of rc?.logs ?? []) {
       if (l.address.toLowerCase() !== CSD_SETTLEMENT.toLowerCase()) continue;
-      let ev: any = null;
+      let ev: any = null, kind: "settled" | "released" = "settled";
       for (const abi of SETTLED_EVENTS) { try { ev = decodeEventLog({ abi: [abi], data: l.data, topics: l.topics as any }); break; } catch {} }
+      if (!ev) { try { ev = decodeEventLog({ abi: [RELEASED_EARLY], data: l.data, topics: l.topics as any }); kind = "released"; } catch {} }
       if (!ev) continue;
       const x = ev.args;
-      ok = String(x.authHash).toLowerCase() === String(o.payload.authHash).toLowerCase()
+      const match = String(x.authHash).toLowerCase() === String(o.payload.authHash).toLowerCase()
         && (String(x.buyer).toLowerCase() === o.signer || String(x.sellerUsdcRecipient).toLowerCase() === o.signer)
         && String(x.buyer).toLowerCase() !== String(x.sellerUsdcRecipient).toLowerCase()
         && String(x.usdcAmount) === String(o.payload.usdcAmount) && String(x.csdAmount) === String(o.payload.csdAmount)
         && String(x.buyer).toLowerCase() === String(o.payload.buyer).toLowerCase() && String(x.sellerUsdcRecipient).toLowerCase() === String(o.payload.sellerUsdcRecipient).toLowerCase();
-      if (ok) break;
+      if (match) { ok = kind; break; }
     }
   } catch {}
   verified.set(o.objectHash, ok);
   return ok;
 }
-// Makers proven before are remembered in this browser (receipts can be pushed out of view by others)
-const PROVEN_KEY = "covenant.csd.proven";
-const provenBefore = (): string[] => { try { return JSON.parse(localStorage.getItem(PROVEN_KEY) ?? "[]"); } catch { return []; } };
+// Makers proven before are remembered in this browser for 30 days (receipts can be pushed out of
+// view by others), and forgotten as soon as one declines or doesn't answer
+const PROVEN_KEY = "covenant.csd.proven2";
+const provenMap = (): Record<string, number> => { try { return JSON.parse(localStorage.getItem(PROVEN_KEY) ?? "{}"); } catch { return {}; } };
+const provenBefore = (): string[] => Object.entries(provenMap()).filter(([, t]) => t > Date.now() - 30 * 86400_000).map(([a]) => a);
+function rememberProven(addrs: string[]) {
+  const m = provenMap(); for (const a of addrs) m[a] = Date.now();
+  try { localStorage.setItem(PROVEN_KEY, JSON.stringify(Object.fromEntries(Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 200)))); } catch {}
+}
+function forgetProven(addr: string) { const m = provenMap(); delete m[addr.toLowerCase()]; try { localStorage.setItem(PROVEN_KEY, JSON.stringify(m)); } catch {} }
 const OFFERS_KEY = "covenant.csd.offers";
 const remembered = (): string[] => { try { return JSON.parse(localStorage.getItem(OFFERS_KEY) ?? "[]"); } catch { return []; } };
 async function loadMarket(read?: Reader): Promise<Market> {
@@ -164,11 +175,13 @@ async function loadMarket(read?: Reader): Promise<Market> {
   try {
     for (const o of await aon.receipts(makers.map(x => x.addr), 40)) {
       if (String(o.payload?.settlementContract).toLowerCase() !== CSD_SETTLEMENT.toLowerCase() || !(BigInt(o.payload?.csdAmount ?? 0) > 0n)) continue;
-      if (read && await realReceipt(o, read)) real.push(o);
+      const k = read ? await realReceipt(o, read) : null;
+      if (k) real.push({ ...o, how: k });
     }
   } catch {}
-  const proven = new Set([...known, ...provenBefore(), ...real.map(o => o.signer)]);
-  try { localStorage.setItem(PROVEN_KEY, JSON.stringify([...new Set([...provenBefore(), ...real.map(o => o.signer)])].slice(-200))); } catch {}
+  const provenNow = real.filter(o => o.how === "settled").map(o => o.signer);
+  const proven = new Set([...known, ...provenBefore(), ...provenNow]);
+  rememberProven(provenNow);
   // Trades (and the book) use proven makers on each side; if none is quoting a side, any maker
   for (const side of ["sell", "buy"] as const) {
     const anyProven = makers.some(x => x[side] && proven.has(x.addr));

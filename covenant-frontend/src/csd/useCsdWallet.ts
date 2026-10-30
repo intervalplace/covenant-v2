@@ -81,10 +81,10 @@ export function useCsdWallet(account?: Address) {
 
   const balance = coins.reduce((s, c) => s + c.value, 0n);
 
-  // A signed payment from this wallet (not broadcast)
-  const pay = useCallback((to: { value: bigint; addr20: Hex }[]) => {
+  // A signed payment from this wallet (not broadcast), from all its coins or just the ones given
+  const pay = useCallback((to: { value: bigint; addr20: Hex }[], from?: CsdUtxo[]) => {
     if (!wallet) throw new Error("CSD wallet not set up");
-    return buildPayment({ utxos: coins, to, change: wallet.key(0).addr20 });
+    return buildPayment({ utxos: from ?? coins, to, change: wallet.key(0).addr20 });
   }, [wallet, coins]);
 
   const send = useCallback(async (to: Hex, value: bigint) => {

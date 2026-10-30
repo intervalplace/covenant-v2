@@ -19,7 +19,7 @@ export const CSD_TARGET_REF = (() => { try { return BigInt(process.env.NEXT_PUBL
 export const CSD_ENABLED = !!CSD_MM_URL && !!CSD_SETTLEMENT && (CSD_TARGET_REF > 0n || !!CSD_NODE_URL);
 // Confirmations the market maker must prove before it is paid for CSD you buy.
 // Only it waits; deeper makes a faked payment more expensive.
-export const CSD_BUY_CONFIRMATIONS = 10n;
+export const CSD_BUY_CONFIRMATIONS = 20n;
 export const CSD_EXPLORER = process.env.NEXT_PUBLIC_CSD_EXPLORER ?? "";
 
 export const csdDomain = () => ({ name: "AON CSD/USDC", version: "4", chainId: CHAIN_ID, verifyingContract: CSD_SETTLEMENT });
@@ -52,6 +52,8 @@ export const PERMIT_TYPES = {
     { name: "deadline", type: "uint256" },
   ],
 } as const;
+
+export const csdRefundAbi = [{ type: "function", name: "refundExpiredLock", stateMutability: "nonpayable", outputs: [], inputs: [{ name: "auth", type: "tuple", components: CSD_AUTH_TYPES.CsdUsdcAuthorization }] }] as const;
 
 export const csdSettlementAbi = [
   { type: "function", name: "usdcLocked",  stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "bool" }] },

@@ -51,6 +51,7 @@ const errText = (e: any) => {
   if (m === "NO_RESPONSE") return "The market maker didn't answer. Nothing was traded.";
   if (m === "NO_RESPONSE_BUY") return "No answer from the market maker yet. If it takes the trade, it shows up in Your trades; otherwise nothing happens.";
   if (m === "SELLS_PAUSED") return "Selling is paused for a little while. Try again later.";
+  if (m === "MARKET_MAKER_PAUSED") return "The market maker is paused for a moment. Nothing was traded; try again later.";
   if (m === "FINISH_YOUR_OTHER_BUY") return "Your previous buy is still being locked. Try again in a few seconds.";
   if (m === "NOT_ENOUGH_USDC") return "Your wallet doesn't have enough USDC for that.";
   if (m === "SLOW_DOWN") return "Too many requests. Wait a minute and try again.";

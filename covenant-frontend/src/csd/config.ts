@@ -62,7 +62,11 @@ export const csdSettlementAbi = [
   { type: "function", name: "usdcLocked",  stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "bool" }] },
   { type: "function", name: "lockedUntil", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "uint256" }] },
   { type: "function", name: "finalizedAuthorization", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "bool" }] },
+  { type: "function", name: "totalLocked", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+  { type: "function", name: "maxTotalLocked", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
 ] as const;
+// Locked with every sale for whoever settles it if its maker doesn't release (so a watchtower can, and is paid)
+export const CSD_SALE_EXECUTOR_FEE = 1_000_000n;
 
 const CSD_AUTH_COMPONENTS = CSD_AUTH_TYPES.CsdUsdcAuthorization;
 const HEADER_COMPONENTS = [

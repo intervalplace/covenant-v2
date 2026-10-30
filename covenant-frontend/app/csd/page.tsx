@@ -330,7 +330,26 @@ export default function CsdMarketPage() {
   const problem = (() => {
     if (!m || csdAmt === 0n) return "";
     if (csdAmt < 0n) return "Enter an amount like 25 or 12.5.";
-    if (!preview) return "No market maker can take that size right now. Try a smaller amount.";
+    if (!preview) {
+      // Why not: below every maker's smallest trade, above every maker's largest, or none quoting
+      const offers = m.makers.map(x => side === "buy" ? x.sell : x.buy).filter(Boolean);
+      // (as routes() measures them: the USDC amount, and the lock size including fees)
+      const raw = offers.map(o => { try { const p = poolOf(o), f = BigInt(o.payload.feeUsdc);
+        return side === "buy" ? quoteBuy(p, csdAmt) : quoteSell(p, csdAmt) - f; } catch { return null; } });
+      const locks = offers.map((o, i) => raw[i] === null ? null : side === "buy" ? raw[i]! + BigInt(o.payload.feeUsdc) : raw[i]! + CSD_SALE_EXECUTOR_FEE);
+      const minT = offers.reduce<bigint | null>((a, o) => { const v = BigInt(o.payload.minTradeUsdc); return a === null || v < a ? v : a; }, null);
+      const maxT = offers.reduce<bigint | null>((a, o) => { const v = BigInt(o.payload.maxTradeUsdc); return a === null || v > a ? v : a; }, null);
+      const best = side === "buy" ? m.bestAsk : m.bestBid;
+      if (!offers.length) return side === "buy" ? "Nobody is selling CSD right now." : "Nobody is buying CSD right now.";
+      if (minT !== null && raw.every(v => v !== null && v < minT)) {
+        // (a sale's fee comes out of what you receive, so it takes a little more CSD)
+        const need = side === "sell" ? minT + BigInt(offers[0]!.payload.feeUsdc) : minT;
+        const csdMin = best ? (need * 100_000_000n) / best + 100_000_000n : null;
+        return `The smallest trade is ${fmtUsdc(minT)} USDC${csdMin ? ` (about ${fmtCsd(csdMin - (csdMin % 100_000_000n))} CSD)` : ""}.`;
+      }
+      if (maxT !== null && locks.every(v => v === null || v > maxT)) return `Trades are limited to ${fmtUsdc(maxT)} USDC each for now.`;
+      return "No market maker can take that size right now. Try a smaller amount.";
+    }
     if (side === "buy" && usdcBal !== null && preview.total > usdcBal) return `You have ${fmtUsdc(usdcBal)} USDC.`;
     if (side === "sell" && csd.ready && csd.loaded && csdAmt + 10_000n > csd.balance) return `Your CSD wallet has ${fmtCsd(csd.balance)} CSD ready to spend.`;
     return "";

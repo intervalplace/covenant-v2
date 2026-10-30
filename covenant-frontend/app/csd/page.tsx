@@ -277,7 +277,11 @@ export default function CsdMarketPage() {
       const a = t.authorization, conf = Number(a.minConfirmations);
       const base = CSD_NODE_URL || `${CSD_MM_URL}/api/csd`;
       if (t.csdTx) { const n = csdNode(base); await n.submit(txFromNodeJson(t.csdTx)).catch(() => {}); }
-      const proof = await (await fetch(`${base}/proof/tx/${t.csdTxid}`)).json();
+      // The proof is the same whoever serves it (the contract checks it): the market maker's proxy first, then the node
+      let proof: any = null;
+      for (const src of [`${CSD_MM_URL}/api/csd`, CSD_NODE_URL].filter(Boolean)) {
+        try { proof = await (await fetch(`${src}/proof/tx/${t.csdTxid}`)).json(); if (proof?.ok) break; } catch {}
+      }
       if (!proof?.ok) throw new Error("Your CSD payment isn't in a block yet. Try again in a few minutes.");
       const need = BigInt(conf) * work(BigInt(a.csdMaxTarget)); let have = work(bitsToTarget(Number(proof.header.bits)));
       const chain: any[] = []; const n = csdNode(base);

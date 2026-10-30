@@ -5,6 +5,7 @@
 // reaches the market maker once it proves the CSD payment on Ethereum. Selling,
 // the market maker locks USDC for the user first, the page checks the lock on
 // Ethereum, and only then does the in-site CSD wallet pay.
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAccount, useConnect, usePublicClient, useSignTypedData, useWriteContract } from "wagmi";
 import { injected } from "@wagmi/core";
@@ -482,7 +483,7 @@ export default function CsdMarketPage() {
                   onClick={() => { navigator.clipboard?.writeText(csd.main!.addr20.slice(2)); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
                   {csd.main!.addr20.slice(2)}
                 </button>
-                {copied && <div className="faint">Copied</div>}
+                <div className="faint">{copied ? "Copied" : "Send CSD here to sell it."}</div>
               </div>
               <details>
                 <summary className="link-btn" style={{ cursor: "pointer" }}>Send CSD</summary>
@@ -492,6 +493,7 @@ export default function CsdMarketPage() {
                   <button className="btn-secondary" onClick={sendCsd} disabled={!!busy}>Send</button>
                 </div>
               </details>
+              <p className="faint">Your keys, in this browser. Only you can move it. <Link href="/docs/#csd-wallet">How it works</Link></p>
               <button className="link-btn faint" style={{ justifySelf: "start" }} onClick={csd.forget}>Forget on this device</button>
               {csd.error && <div className="danger" style={{ fontSize: 14 }}>CSD network unreachable</div>}
             </div>

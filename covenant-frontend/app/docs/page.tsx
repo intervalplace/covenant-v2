@@ -43,6 +43,53 @@ export default function Docs() {
 
       {hr}
 
+      <h2 id="csd">CSD/USDC</h2>
+      <p className="muted" style={{ marginTop: 12 }}>
+        Compute Substrate (CSD) runs on its own blockchain, so it can&apos;t sit in an
+        Ethereum wallet. You trade it with a market maker, settled by the
+        {" "}{code("CsdUsdcSettlement")} contract on Ethereum, with objects in the
+        {" "}{code("aon:csd-usdc")} namespace. Prices come from the market maker&apos;s
+        pool: buying moves the price up, selling moves it down. Trades are 1–30 USDC for now.
+      </p>
+
+      <h3 id="csd-wallet" style={{ marginTop: 24 }}>Your CSD wallet</h3>
+      <p className="muted" style={{ marginTop: 10 }}>
+        The page gives you a CSD wallet of your own. Its keys are made from a
+        signature by your Ethereum wallet and stay in your browser: Covenant and
+        the market maker never have them and can&apos;t move your CSD. The same
+        Ethereum wallet opens the same CSD wallet on any device, and
+        &quot;Forget on this device&quot; removes it from the browser.
+      </p>
+      <p className="muted" style={{ marginTop: 10 }}>
+        To sell CSD you hold elsewhere, send it to this wallet&apos;s address first.
+        That isn&apos;t a deposit with an exchange: you&apos;re moving it to another
+        wallet you control, and you can send it anywhere at any time with
+        &quot;Send CSD&quot;. It lives in this wallet so the page can pay at exactly the
+        right moment, which is what makes selling instant. Like any wallet kept in a
+        browser, it&apos;s meant for trading amounts.
+      </p>
+
+      <h3 style={{ marginTop: 24 }}>Buying</h3>
+      <p className="muted" style={{ marginTop: 10 }}>
+        You sign twice, both free: the trade, and a USDC permit. No ETH needed. The
+        market maker locks your USDC in the contract and sends the CSD as soon as
+        the lock is on Ethereum. The contract pays the market maker only when it
+        proves on Ethereum that it paid you (20 CSD blocks). If it doesn&apos;t, your
+        USDC comes back: the market maker refunds it, or you can with the Refund
+        button.
+      </p>
+
+      <h3 style={{ marginTop: 24 }}>Selling</h3>
+      <p className="muted" style={{ marginTop: 10 }}>
+        The market maker locks USDC for you in the contract first. The page checks
+        that lock on Ethereum, then your CSD wallet pays, and the market maker
+        releases the USDC straight away, in about half a minute. If it ever
+        doesn&apos;t, the Claim button takes the USDC with a proof of your payment.
+        Your CSD never moves before the USDC is locked for you.
+      </p>
+
+      {hr}
+
       <h2>Objects</h2>
       <ul style={{ paddingLeft: 22, color: "var(--muted)", lineHeight: 2.1, marginTop: 14 }}>
         <li><strong>Authorization</strong> — EIP-712 signed. Market, side, maximum base (sell) or quote (buy) exposure, executor fee budget, price band, validity window.</li>

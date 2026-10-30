@@ -6,22 +6,22 @@
 // the market maker locks USDC for the user first, the page checks the lock on
 // Ethereum, and only then does the in-site CSD wallet pay.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useAccount, useConnect, usePublicClient, useSignTypedData } from "wagmi";
+import { useAccount, useConnect, usePublicClient, useSignTypedData, useWriteContract } from "wagmi";
 import { injected } from "@wagmi/core";
 import { formatUnits, hashTypedData, keccak256, parseUnits, toHex, type Address, type Hex } from "viem";
 import { CHAIN_ID } from "@/config";
 import { MarketTabs } from "@/market-tabs";
 import {
-  CSD_ENABLED, CSD_MM_URL, CSD_SETTLEMENT, CSD_USDC, CSD_GENESIS, CSD_BUY_CONFIRMATIONS, CSD_EXPLORER,
+  CSD_ENABLED, CSD_MM_URL, CSD_SETTLEMENT, CSD_USDC, CSD_GENESIS, CSD_BUY_CONFIRMATIONS, CSD_EXPLORER, CSD_NODE_URL, CSD_TARGET_REF, csdSettleAbi,
   CSD_AUTH_TYPES, PERMIT_TYPES, csdDomain, csdSettlementAbi, usdcPermitAbi, mmGet, mmPost, type CsdMarket,
 } from "@/csd/config";
-import { addr20ToBytes32, csdAddressProof, txToNodeJson, type Hex as CHex } from "@/csd/csd-wallet";
+import { addr20ToBytes32, csdAddressProof, txToNodeJson, txFromNodeJson, bitsToTarget, suggestedMaxTarget, csdNode, type Hex as CHex } from "@/csd/csd-wallet";
 import { quoteBuy, quoteSell, midPrice, type Pool } from "@/csd/pool";
 import { useCsdWallet } from "@/csd/useCsdWallet";
 
 type Side = "buy" | "sell";
 type MyTrade = { authHash: Hex; side: Side; csdAmount: string; usdcAmount: string; at: number; lockTx?: Hex; csdTxid?: Hex; releaseTx?: Hex;
-  status: "pending" | "done" | "failed"; csdAddress?: Hex; authorization?: any; signature?: Hex };
+  status: "pending" | "done" | "failed"; csdAddress?: Hex; authorization?: any; signature?: Hex; csdTx?: any };
 type Banner = { kind: "info" | "ok" | "danger"; text: string; links?: { href: string; label: string }[] } | null;
 
 const etherscanTx = (tx: string) => (CHAIN_ID === 1 ? `https://etherscan.io/tx/${tx}` : "#");
@@ -41,6 +41,9 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const errText = (e: any) => {
   const m = String(e?.shortMessage ?? e?.message ?? e);
   if (/User rejected|denied/i.test(m)) return "You cancelled in your wallet. Nothing was traded.";
+  if (m === "SELLS_PAUSED") return "Selling is paused for a little while. Try again later.";
+  if (m === "FINISH_YOUR_OTHER_SALE" || m === "TOO_MANY_UNPAID_SALES") return "Finish or wait out your other sale first.";
+  if (m === "TOO_LATE_TO_PAY") return "That offer expired before your CSD was sent. Nothing was sent; try again.";
   if (m.startsWith("PRICE_MOVED")) return "The price moved while you were signing. Check the new price and try again.";
   if (m === "BUSY_TRY_AGAIN_SHORTLY") return "The market maker is busy with other trades. Try again in a minute.";
   if (m.startsWith("NOT_ENOUGH_")) return "The market maker can't fill that size right now. Try a smaller amount.";
@@ -49,11 +52,35 @@ const errText = (e: any) => {
   return m;
 };
 
+// CSD's current difficulty target from a node the site trusts (not the market
+// maker), or null when the build has none
+const independentNode = CSD_NODE_URL ? csdNode(CSD_NODE_URL) : null;
+async function trustedCsdTarget(): Promise<bigint | null> {
+  if (!independentNode) return null;
+  const tip = await independentNode.tip();
+  return bitsToTarget(Number((await independentNode.headerAt(tip.height)).bits));
+}
+// The easiest difficulty a buy may sign for: 3/4 of the real one (live), or half
+// of the build's reference. Easier than that and fake CSD blocks get cheap.
+async function maxBuyTarget(): Promise<bigint> {
+  const live = await trustedCsdTarget().catch(() => null);
+  if (live !== null) { const s = live * 4n / 3n; return s > live ? s : live; }
+  return CSD_TARGET_REF * 2n;
+}
+// The hardest difficulty a market maker's lock may demand for your sale, so that
+// you could still prove your payment yourself: the real one (live), or twice the reference.
+async function minSellTarget(): Promise<bigint> {
+  const live = await trustedCsdTarget().catch(() => null);
+  return live !== null ? live : CSD_TARGET_REF / 2n;
+}
+const work = (target: bigint) => (1n << 256n) / (target + 1n);
+
 export default function CsdMarketPage() {
   const { address, isConnected, chainId } = useAccount();
   const { connect } = useConnect();
   const publicClient = usePublicClient();
   const { signTypedDataAsync } = useSignTypedData();
+  const { writeContractAsync } = useWriteContract();
   const csd = useCsdWallet(address);
   const [m, setM] = useState<CsdMarket | null>(null);
   const [mErr, setMErr] = useState("");
@@ -142,11 +169,15 @@ export default function CsdMarketPage() {
       const fresh = await mmGet<CsdMarket>("/market"); setM(fresh);
       const p = { usdc: BigInt(fresh.pool.usdc), csd: BigInt(fresh.pool.csd), spreadBps: BigInt(fresh.spreadBps) };
       const usdcAmount = quoteBuy(p, csdAmt), feeAmt = BigInt(fresh.feeUsdc);
+      if (usdcAmount + feeAmt > preview.total * 1005n / 1000n) throw new Error(`PRICE_MOVED`);
+      // Never sign an easier difficulty than the site's own bound, whatever the market maker suggests
+      const cap = await maxBuyTarget(), suggested = BigInt(fresh.csd.suggestedMaxTarget);
+      const csdMaxTarget = suggested < cap ? suggested : cap;
       const key = csd.freshKey(w);
       const t = Math.floor(Date.now() / 1000);
       const auth = { buyer: address, sellerUsdcRecipient: fresh.marketMaker, sellerCsdScriptHash: addr20ToBytes32(key.addr20) as Hex, csdGenesisHash: CSD_GENESIS,
         tradeIntentHash: keccak256(toHex("covenant.market CSD/USDC")), csdAmount: csdAmt, usdc: CSD_USDC, usdcAmount, minConfirmations: CSD_BUY_CONFIRMATIONS,
-        csdMaxTarget: BigInt(fresh.csd.suggestedMaxTarget), executorFeeAmount: feeAmt, validAfter: BigInt(t - 120), validBefore: BigInt(t + 3 * 3600),
+        csdMaxTarget, executorFeeAmount: feeAmt, validAfter: BigInt(t - 120), validBefore: BigInt(t + 3 * 3600),
         nonce: toHex(crypto.getRandomValues(new Uint8Array(32))) };
       const signature = await signTypedDataAsync({ domain: csdDomain(), types: CSD_AUTH_TYPES, primaryType: "CsdUsdcAuthorization", message: auth });
       const authHash = hashTypedData({ domain: csdDomain(), types: CSD_AUTH_TYPES, primaryType: "CsdUsdcAuthorization", message: auth });
@@ -156,16 +187,16 @@ export default function CsdMarketPage() {
         publicClient.readContract({ address: CSD_USDC, abi: usdcPermitAbi, functionName: "version" }),
         publicClient.readContract({ address: CSD_USDC, abi: usdcPermitAbi, functionName: "nonces", args: [address] }),
       ]) as [string, string, bigint];
-      const deadline = BigInt(t + 3600);
+      const deadline = BigInt(t + 300); // short: if this trade doesn't happen now, the permit can't be used later
       const ps = await signTypedDataAsync({ domain: { name, version, chainId: CHAIN_ID, verifyingContract: CSD_USDC }, types: PERMIT_TYPES, primaryType: "Permit",
         message: { owner: address, spender: CSD_SETTLEMENT, value: usdcAmount + feeAmt, nonce, deadline } });
       setBusy("Locking your USDC and sending the CSD…");
       const r = await mmPost("/buy", { authorization: auth, signature, addressProof: csdAddressProof(key, authHash as CHex),
         permit: { deadline, r: ps.slice(0, 66), s: "0x" + ps.slice(66, 130), v: parseInt(ps.slice(130, 132), 16) } });
-      saveTrade({ authHash, side: "buy", csdAmount: String(csdAmt), usdcAmount: String(usdcAmount + feeAmt), at: Date.now(), lockTx: r.lockTx, csdTxid: r.csdTxid, status: "pending", csdAddress: key.addr20 as Hex });
+      saveTrade({ authHash, side: "buy", csdAmount: String(csdAmt), usdcAmount: String(usdcAmount + feeAmt), at: Date.now(), lockTx: r.lockTx, status: "pending", csdAddress: key.addr20 as Hex });
       setAmount("");
-      setBanner({ kind: "ok", text: `Bought ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(usdcAmount + feeAmt)} USDC. It's on its way to your CSD wallet and can be spent after its first CSD block (about 2 minutes). Your USDC is held by the contract until the market maker proves the payment, or comes back to you.`,
-        links: [{ href: etherscanTx(r.lockTx), label: "USDC lock" }, ...(r.csdTxid && csdTxLink(r.csdTxid) ? [{ href: csdTxLink(r.csdTxid), label: "CSD payment" }] : [])] });
+      setBanner({ kind: "ok", text: `Bought ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(usdcAmount + feeAmt)} USDC. The CSD is sent as soon as your USDC lock is on Ethereum (a few seconds), and can be spent after its first CSD block (about 2 minutes). Your USDC is held by the contract until the market maker proves the payment, or comes back to you.`,
+        links: [{ href: etherscanTx(r.lockTx), label: "USDC lock" }] });
       setTimeout(readUsdc, 15000);
     } catch (e) { setBanner({ kind: "danger", text: errText(e) }); }
     finally { setBusy(null); }
@@ -184,9 +215,12 @@ export default function CsdMarketPage() {
       const auth = { ...a, csdAmount: BigInt(a.csdAmount), usdcAmount: BigInt(a.usdcAmount), minConfirmations: BigInt(a.minConfirmations), csdMaxTarget: BigInt(a.csdMaxTarget),
         executorFeeAmount: BigInt(a.executorFeeAmount), validAfter: BigInt(a.validAfter), validBefore: BigInt(a.validBefore) };
       const authHash = hashTypedData({ domain: csdDomain(), types: CSD_AUTH_TYPES, primaryType: "CsdUsdcAuthorization", message: auth });
+      // ...including that you could prove the payment yourself if the market maker never released:
+      // a difficulty real blocks meet, and enough time on the lock for its confirmations
       const ok = authHash === o.authHash && auth.sellerUsdcRecipient?.toLowerCase() === address.toLowerCase() && auth.csdAmount === csdAmt
         && auth.usdcAmount >= minOut && auth.usdc?.toLowerCase() === CSD_USDC.toLowerCase() && auth.csdGenesisHash?.toLowerCase() === CSD_GENESIS.toLowerCase()
-        && auth.minConfirmations <= 10n && auth.sellerCsdScriptHash?.toLowerCase() === addr20ToBytes32(o.csdAddress).toLowerCase();
+        && auth.minConfirmations <= 20n && auth.csdMaxTarget >= await minSellTarget()
+        && auth.sellerCsdScriptHash?.toLowerCase() === addr20ToBytes32(o.csdAddress).toLowerCase();
       if (!ok) throw new Error("The market maker's offer didn't match what you asked for. Nothing was sent.");
       saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, status: "pending", authorization: a, signature: o.signature });
       setBusy("Waiting for the USDC lock on Ethereum…");
@@ -195,15 +229,16 @@ export default function CsdMarketPage() {
           publicClient.readContract({ address: CSD_SETTLEMENT, abi: csdSettlementAbi, functionName: "usdcLocked", args: [authHash] }),
           publicClient.readContract({ address: CSD_SETTLEMENT, abi: csdSettlementAbi, functionName: "lockedUntil", args: [authHash] }),
         ]) as [boolean, bigint];
-        if (locked && Number(until) - Date.now() / 1000 > 600) break;
+        if (locked && Number(until) - Date.now() / 1000 > Number(auth.minConfirmations) * 240 + 300) break;
         if (i > 60) throw new Error("The USDC lock didn't appear on Ethereum. Nothing was sent; you can try again.");
         await sleep(2000);
       }
       setBusy("Sending your CSD…");
       const p = csd.pay([{ value: csdAmt, addr20: o.csdAddress }]);
       const r = await mmPost("/sell/pay", { authHash, tx: txToNodeJson(p.tx) });
+      independentNode?.submit(p.tx).catch(() => {}); // also broadcast it ourselves, not only through the market maker
       csd.spentLocally(new Set(p.spent.map(s => s.txid)));
-      saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, releaseTx: r.releaseTx, status: r.releaseTx ? "done" : "pending", authorization: a, signature: o.signature });
+      saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, releaseTx: r.releaseTx, status: r.releaseTx ? "done" : "pending", authorization: a, signature: o.signature, csdTx: txToNodeJson(p.tx) });
       setAmount("");
       if (r.releaseTx) {
         setBusy("Releasing your USDC…");
@@ -213,6 +248,37 @@ export default function CsdMarketPage() {
         setBanner({ kind: "info", text: `Sold ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(auth.usdcAmount)} USDC. The market maker is releasing it after the next CSD block, in about 2 minutes. It's locked for you on Ethereum in the meantime.` });
       }
       readUsdc(); setTimeout(csd.refresh, 3000);
+    } catch (e) { setBanner({ kind: "danger", text: errText(e) }); }
+    finally { setBusy(null); }
+  }
+
+  // If the market maker never releases a sale you paid for, claim it yourself
+  // with a proof of your CSD payment (you pay the Ethereum gas)
+  async function claim(t: MyTrade) {
+    if (!t.authorization || !t.signature || !t.csdTxid || !publicClient) return;
+    setBanner(null); setBusy("Building the proof of your CSD payment…");
+    try {
+      const a = t.authorization, conf = Number(a.minConfirmations);
+      const base = CSD_NODE_URL || `${CSD_MM_URL}/api/csd`;
+      if (t.csdTx) { const n = csdNode(base); await n.submit(txFromNodeJson(t.csdTx)).catch(() => {}); }
+      const proof = await (await fetch(`${base}/proof/tx/${t.csdTxid}`)).json();
+      if (!proof?.ok) throw new Error("Your CSD payment isn't in a block yet. Try again in a few minutes.");
+      const need = BigInt(conf) * work(BigInt(a.csdMaxTarget)); let have = work(bitsToTarget(Number(proof.header.bits)));
+      const chain: any[] = []; const n = csdNode(base);
+      for (let h = Number(proof.height) + 1; have < need && chain.length < 120; h++) {
+        const hd = await n.headerAt(h); if (!hd?.bits) throw new Error(`Not enough CSD blocks yet: the proof needs about ${conf} after your payment. Try again later.`);
+        chain.push(hd); have += work(bitsToTarget(Number(hd.bits)));
+      }
+      const hdr = (h: any) => ({ version: Number(h.version), prev: h.prev, merkle: h.merkle, time: BigInt(h.time), bits: Number(h.bits), nonce: Number(h.nonce) });
+      const auth = { ...a, csdAmount: BigInt(a.csdAmount), usdcAmount: BigInt(a.usdcAmount), minConfirmations: BigInt(a.minConfirmations), csdMaxTarget: BigInt(a.csdMaxTarget),
+        executorFeeAmount: BigInt(a.executorFeeAmount), validAfter: BigInt(a.validAfter), validBefore: BigInt(a.validBefore) };
+      setBusy("Confirm the claim in your wallet…");
+      const tx = await writeContractAsync({ address: CSD_SETTLEMENT, abi: csdSettleAbi, functionName: "settleCsdUsdc", args: [auth, t.signature, {
+        txRaw: proof.tx_raw, merkleBranch: (proof.merkle_branch ?? []).map((s: any) => ({ hash: s.hash, isLeft: s.position === "left" })),
+        header: hdr(proof.header), confirmationChain: chain.map(hdr) }] });
+      await publicClient.waitForTransactionReceipt({ hash: tx });
+      saveTrade({ ...t, releaseTx: tx, status: "done" }); readUsdc();
+      setBanner({ kind: "ok", text: `Claimed ${fmtUsdc(BigInt(t.usdcAmount))} USDC with a proof of your CSD payment.`, links: [{ href: etherscanTx(tx), label: "Transaction" }] });
     } catch (e) { setBanner({ kind: "danger", text: errText(e) }); }
     finally { setBusy(null); }
   }
@@ -429,7 +495,9 @@ export default function CsdMarketPage() {
                   <td>{fmtCsd(BigInt(t.csdAmount))} CSD</td>
                   <td>{fmtUsdc(BigInt(t.usdcAmount))} USDC</td>
                   <td className="muted">{t.status === "pending" ? (t.side === "buy" ? "CSD on its way" : "Releasing") : new Date(t.at).toLocaleDateString()}</td>
-                  <td>{(t.releaseTx ?? t.lockTx) && <a href={etherscanTx((t.releaseTx ?? t.lockTx)!)} target="_blank" rel="noreferrer">Tx</a>}</td>
+                  <td>{t.side === "sell" && t.status === "pending" && t.csdTxid && Date.now() - t.at > 10 * 60_000
+                    ? <button className="link-btn" onClick={() => claim(t)} disabled={!!busy} title="The market maker hasn't released it. Claim the USDC yourself with a proof of your CSD payment (costs a little ETH).">Claim</button>
+                    : (t.releaseTx ?? t.lockTx) && <a href={etherscanTx((t.releaseTx ?? t.lockTx)!)} target="_blank" rel="noreferrer">Tx</a>}</td>
                 </tr>
               ))}
             </tbody></table>

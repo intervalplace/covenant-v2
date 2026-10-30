@@ -8,10 +8,18 @@ export const CSD_MM_URL = (process.env.NEXT_PUBLIC_CSD_MM_URL ?? "").replace(/\/
 export const CSD_SETTLEMENT = (process.env.NEXT_PUBLIC_CSD_SETTLEMENT ?? "") as Address;
 export const CSD_USDC = TOKENS.USDC.address as Address;
 export const CSD_GENESIS = (process.env.NEXT_PUBLIC_CSD_GENESIS ?? "0x00000052c2821f71b19c3d79dfabfb12d4076ba15d83b47d008e582aad6c0d52") as Hex;
-export const CSD_ENABLED = !!CSD_MM_URL && !!CSD_SETTLEMENT;
+// A CSD node the site trusts independently of the market maker (optional). Used
+// to read the current difficulty and to broadcast your payments.
+export const CSD_NODE_URL = (process.env.NEXT_PUBLIC_CSD_NODE_URL ?? "").replace(/\/$/, "");
+// CSD's difficulty target when this build was made (decimal or 0x hex). The
+// difficulty you sign for is never easier than half of it, so a market maker
+// can't get you to accept cheaply faked CSD blocks. Rebuild if CSD's
+// difficulty falls by more than half.
+export const CSD_TARGET_REF = (() => { try { return BigInt(process.env.NEXT_PUBLIC_CSD_TARGET_REF || "0"); } catch { return 0n; } })();
+export const CSD_ENABLED = !!CSD_MM_URL && !!CSD_SETTLEMENT && (CSD_TARGET_REF > 0n || !!CSD_NODE_URL);
 // Confirmations the market maker must prove before it is paid for CSD you buy.
 // Only it waits; deeper makes a faked payment more expensive.
-export const CSD_BUY_CONFIRMATIONS = 6n;
+export const CSD_BUY_CONFIRMATIONS = 10n;
 export const CSD_EXPLORER = process.env.NEXT_PUBLIC_CSD_EXPLORER ?? "";
 
 export const csdDomain = () => ({ name: "AON CSD/USDC", version: "4", chainId: CHAIN_ID, verifyingContract: CSD_SETTLEMENT });
@@ -50,6 +58,26 @@ export const csdSettlementAbi = [
   { type: "function", name: "lockedUntil", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "uint256" }] },
   { type: "function", name: "finalizedAuthorization", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "bool" }] },
 ] as const;
+
+const CSD_AUTH_COMPONENTS = CSD_AUTH_TYPES.CsdUsdcAuthorization;
+const HEADER_COMPONENTS = [
+  { name: "version", type: "uint32" }, { name: "prev", type: "bytes32" }, { name: "merkle", type: "bytes32" },
+  { name: "time", type: "uint64" }, { name: "bits", type: "uint32" }, { name: "nonce", type: "uint32" },
+] as const;
+// For claiming a sale yourself with a CSD proof, if the market maker never releases it
+export const csdSettleAbi = [{
+  type: "function", name: "settleCsdUsdc", stateMutability: "nonpayable", outputs: [],
+  inputs: [
+    { name: "auth", type: "tuple", components: CSD_AUTH_COMPONENTS },
+    { name: "authSig", type: "bytes" },
+    { name: "spvProof", type: "tuple", components: [
+      { name: "txRaw", type: "bytes" },
+      { name: "merkleBranch", type: "tuple[]", components: [{ name: "hash", type: "bytes32" }, { name: "isLeft", type: "bool" }] },
+      { name: "header", type: "tuple", components: HEADER_COMPONENTS },
+      { name: "confirmationChain", type: "tuple[]", components: HEADER_COMPONENTS },
+    ] },
+  ],
+}] as const;
 
 export const usdcPermitAbi = [
   { type: "function", name: "nonces",    stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] },

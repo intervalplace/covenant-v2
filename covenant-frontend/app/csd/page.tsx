@@ -9,7 +9,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAccount, useConnect, usePublicClient, useSignTypedData, useWriteContract } from "wagmi";
 import { injected } from "@wagmi/core";
-import { formatUnits, hashTypedData, keccak256, parseUnits, recoverTypedDataAddress, toHex, type Address, type Hex } from "viem";
+import { decodeEventLog, formatUnits, hashTypedData, keccak256, parseAbiItem, parseUnits, recoverTypedDataAddress, toHex, type Address, type Hex } from "viem";
 import { CHAIN_ID } from "@/config";
 import { MarketTabs } from "@/market-tabs";
 import {
@@ -114,8 +114,39 @@ function skipMaker(addr: string, ms = 30 * 60_000) {
 // A maker is proven once a trade of its has settled on Ethereum (from its signed receipts, checked
 // on chain), or if the site lists it. Trades go to proven makers; a new maker gets orders after its
 // first settled trade, so a fake maker with tempting prices costs more than an address.
-type Reader = (fn: "finalizedAuthorization", h: Hex) => Promise<boolean>;
-const settled = new Map<string, boolean>(); // authHash → finalized on chain
+type Reader = (txHash: Hex) => Promise<{ logs: { address: string; data: Hex; topics: Hex[] }[] } | null>;
+const SETTLED_EVENTS = [
+  parseAbiItem("event CsdUsdcSettled(bytes32 indexed authHash, bytes32 indexed csdTxid, address indexed buyer, address sellerUsdcRecipient, address usdc, uint256 usdcAmount, uint256 csdAmount)"),
+  parseAbiItem("event CsdUsdcReleasedEarly(bytes32 indexed authHash, bytes32 indexed csdTxid, address indexed buyer, address sellerUsdcRecipient, address usdc, uint256 usdcAmount, uint256 csdAmount)"),
+];
+// A receipt is real if the transaction it names settled exactly that trade on the contract, the
+// maker who signed it was a party to it, and the amounts match. (Checked once per receipt.)
+const verified = new Map<string, boolean>(); // receipt hash → real
+async function realReceipt(o: any, read: Reader): Promise<boolean> {
+  if (verified.has(o.objectHash)) return verified.get(o.objectHash)!;
+  let ok = false;
+  try {
+    const rc = /^0x[0-9a-fA-F]{64}$/.test(String(o.payload?.executionTx)) ? await read(o.payload.executionTx) : null;
+    for (const l of rc?.logs ?? []) {
+      if (l.address.toLowerCase() !== CSD_SETTLEMENT.toLowerCase()) continue;
+      let ev: any = null;
+      for (const abi of SETTLED_EVENTS) { try { ev = decodeEventLog({ abi: [abi], data: l.data, topics: l.topics as any }); break; } catch {} }
+      if (!ev) continue;
+      const x = ev.args;
+      ok = String(x.authHash).toLowerCase() === String(o.payload.authHash).toLowerCase()
+        && (String(x.buyer).toLowerCase() === o.signer || String(x.sellerUsdcRecipient).toLowerCase() === o.signer)
+        && String(x.buyer).toLowerCase() !== String(x.sellerUsdcRecipient).toLowerCase()
+        && String(x.usdcAmount) === String(o.payload.usdcAmount) && String(x.csdAmount) === String(o.payload.csdAmount)
+        && String(x.buyer).toLowerCase() === String(o.payload.buyer).toLowerCase() && String(x.sellerUsdcRecipient).toLowerCase() === String(o.payload.sellerUsdcRecipient).toLowerCase();
+      if (ok) break;
+    }
+  } catch {}
+  verified.set(o.objectHash, ok);
+  return ok;
+}
+// Makers proven before are remembered in this browser (receipts can be pushed out of view by others)
+const PROVEN_KEY = "covenant.csd.proven";
+const provenBefore = (): string[] => { try { return JSON.parse(localStorage.getItem(PROVEN_KEY) ?? "[]"); } catch { return []; } };
 const OFFERS_KEY = "covenant.csd.offers";
 const remembered = (): string[] => { try { return JSON.parse(localStorage.getItem(OFFERS_KEY) ?? "[]"); } catch { return []; } };
 async function loadMarket(read?: Reader): Promise<Market> {
@@ -127,19 +158,17 @@ async function loadMarket(read?: Reader): Promise<Market> {
     && String(o.payload.usdc).toLowerCase() === CSD_USDC.toLowerCase() && String(o.payload.csdGenesisHash).toLowerCase() === CSD_GENESIS.toLowerCase();
   const makers: Maker[] = [...all].map(([addr, x]) => ({ addr, sell: ours(x.sell) ? x.sell : undefined, buy: ours(x.buy) ? x.buy : undefined })).filter(x => x.sell || x.buy);
   if (!makers.length) throw new Error("NO_OFFER");
-  // Receipts, kept only if their trade really settled on Ethereum (and wasn't a maker trading with itself)
+  // Receipts, kept only if they match a real settlement on Ethereum that their maker was part of
   const known = new Set(CSD_MARKET_MAKERS.map(x => x.toLowerCase()));
   const real: any[] = [];
   try {
     for (const o of await aon.receipts(makers.map(x => x.addr), 40)) {
-      const h = String(o.payload?.authHash ?? "").toLowerCase() as Hex;
       if (String(o.payload?.settlementContract).toLowerCase() !== CSD_SETTLEMENT.toLowerCase() || !(BigInt(o.payload?.csdAmount ?? 0) > 0n)) continue;
-      if (String(o.payload?.buyer).toLowerCase() === String(o.payload?.sellerUsdcRecipient).toLowerCase()) continue;
-      if (!settled.has(h) && read) settled.set(h, await read("finalizedAuthorization", h).catch(() => false));
-      if (settled.get(h)) real.push(o);
+      if (read && await realReceipt(o, read)) real.push(o);
     }
   } catch {}
-  const proven = new Set([...known, ...real.map(o => o.signer)]);
+  const proven = new Set([...known, ...provenBefore(), ...real.map(o => o.signer)]);
+  try { localStorage.setItem(PROVEN_KEY, JSON.stringify([...new Set([...provenBefore(), ...real.map(o => o.signer)])].slice(-200))); } catch {}
   // Trades (and the book) use proven makers on each side; if none is quoting a side, any maker
   for (const side of ["sell", "buy"] as const) {
     const anyProven = makers.some(x => x[side] && proven.has(x.addr));
@@ -178,10 +207,9 @@ function routes(mk: Market, side: Side, csd: bigint): Route[] {
   }
   return out.sort((a, b) => side === "buy" ? (a.total < b.total ? -1 : 1) : (a.total > b.total ? -1 : 1));
 }
-// Declines about the user's own side (their coins, balance or other trades): another maker wouldn't help
-const USER_SIDE = /^(COINS_|FINISH_YOUR_|TOO_MANY_UNPAID|ADDRESS_FROM|NOT_ENOUGH_USDC$|SLOW_DOWN|REQUEST_EXPIRED|NAME_YOUR_COINS|CSD_)/;
-// Ordinary "not right now" answers skip a maker briefly; silence or anything odd, for longer
-const BRIEF = /^(PRICE_MOVED|TRADE_SIZE|NOT_ENOUGH_|BUSY|SELLS_PAUSED|MARKET_MAKER_PAUSED)/;
+// Ordinary "not right now" answers skip a maker briefly; silence or anything odd, for longer.
+// (Answers are the maker's own words, so none of them stops the page from trying another maker.)
+const BRIEF = /^(PRICE_MOVED|TRADE_SIZE|NOT_ENOUGH_|BUSY|SELLS_PAUSED|MARKET_MAKER_PAUSED|COINS_|FINISH_YOUR_|TOO_MANY_UNPAID|ADDRESS_FROM|SLOW_DOWN|REQUEST_EXPIRED|NAME_YOUR_COINS|CSD_)/;
 const skipFor = (err: string) => BRIEF.test(err) ? 2 * 60_000 : 30 * 60_000;
 
 // The market maker's signed answer to one of our objects
@@ -199,7 +227,7 @@ export default function CsdMarketPage() {
   const { writeContractAsync } = useWriteContract();
   const csd = useCsdWallet(address);
   const reader = useMemo<Reader | undefined>(() => publicClient
-    ? (fn, h) => publicClient.readContract({ address: CSD_SETTLEMENT, abi: csdSettlementAbi, functionName: fn, args: [h] }) as Promise<boolean> : undefined, [publicClient]);
+    ? (h) => publicClient.getTransactionReceipt({ hash: h }).then(r => r as any, () => null) : undefined, [publicClient]);
   const [m, setM] = useState<Market | null>(null);
   const [mErr, setMErr] = useState("");
   const [side, setSide] = useState<Side>("buy");
@@ -351,10 +379,10 @@ export default function CsdMarketPage() {
       catch (e: any) {
         // Silent or declining: this maker is skipped for a while, so the next try goes elsewhere.
         // (The trade stays followed: if anyone locks it anyway, Refund appears once the lock expires.)
-        if (!USER_SIDE.test(e.message)) skipMaker(maker, skipFor(e.message));
+        skipMaker(maker, skipFor(e.message));
         if (e.message === "NO_RESPONSE") throw new Error("NO_RESPONSE_BUY");
         saveTrade({ ...trade, status: "failed" });
-        if (!USER_SIDE.test(e.message) && routes(fresh, "buy", csdAmt).length > 0) throw new Error("TRY_ANOTHER_MAKER");
+        if (routes(fresh, "buy", csdAmt).length > 0) throw new Error("TRY_ANOTHER_MAKER");
         throw e;
       }
       saveTrade({ ...trade, lockTx: r.lockTx });
@@ -399,7 +427,6 @@ export default function CsdMarketPage() {
         await aon.put(reqObj);
         try { o = await answer(reqObj.objectHash!, c.maker, 20_000); maker = c.maker; break; }
         catch (e: any) {
-          if (USER_SIDE.test(e.message)) throw e; // about your coins or your other sales: another maker won't help
           skipMaker(c.maker, skipFor(e.message));
           if (c === candidates[candidates.length - 1]) throw e;
         }
@@ -439,7 +466,7 @@ export default function CsdMarketPage() {
       // Handed to the maker on AON, then broadcast by us too, whatever the maker does (answer or
       // not, within 20 s): once it's public the payment goes through either way, so the maker can't
       // hold it back, and with it in a block the USDC can always be claimed with a proof
-      const payObj = salePaymentObject({ authorizationObjectHash: o.aon?.auth, csdTxid: p.txid, csdTx: txToNodeJson(p.tx) });
+      const payObj = salePaymentObject({ authorizationObjectHash: o.aon?.auth, authHash, authorization: a, authorizationSignature: o.signature, csdTxid: p.txid, csdTx: txToNodeJson(p.tx) });
       let r: any = {};
       try { await aon.put(payObj); r = await answer(payObj.objectHash!, maker, 20_000); } catch { r = {}; }
       finally {

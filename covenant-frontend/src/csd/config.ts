@@ -66,7 +66,7 @@ export const csdSettlementAbi = [
   { type: "function", name: "maxTotalLocked", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
 ] as const;
 // Locked with every sale for whoever settles it if its maker doesn't release (so a watchtower can, and is paid)
-export const CSD_SALE_EXECUTOR_FEE = 1_000_000n;
+export const CSD_SALE_EXECUTOR_FEE = 2_000_000n; // (a settlement with a proof is ~320k gas)
 
 const CSD_AUTH_COMPONENTS = CSD_AUTH_TYPES.CsdUsdcAuthorization;
 const HEADER_COMPONENTS = [

@@ -96,6 +96,7 @@ export type CsdMarket = {
   csd: { height: number; bits: number; suggestedMaxTarget: string };
   asks: { price: string; csd: string }[]; bids: { price: string; csd: string }[];
   recent: { side: "buy" | "sell"; csdAmount: string; usdcAmount: string; price: string; at: number }[];
+  offers?: { sell?: string; buy?: string };
 };
 
 export async function mmGet<T = any>(path: string): Promise<T> {

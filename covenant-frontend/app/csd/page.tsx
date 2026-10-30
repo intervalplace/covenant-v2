@@ -21,10 +21,12 @@ import { useCsdWallet } from "@/csd/useCsdWallet";
 
 type Side = "buy" | "sell";
 type MyTrade = { authHash: Hex; side: Side; csdAmount: string; usdcAmount: string; at: number; lockTx?: Hex; csdTxid?: Hex; releaseTx?: Hex;
-  status: "pending" | "done" | "failed"; csdAddress?: Hex; authorization?: any; signature?: Hex; csdTx?: any; lockedUntil?: number };
+  status: "pending" | "done" | "failed"; csdAddress?: Hex; authorization?: any; signature?: Hex; csdTx?: any; lockedUntil?: number; receipt?: string };
 type Banner = { kind: "info" | "ok" | "danger"; text: string; links?: { href: string; label: string }[] } | null;
 
 const etherscanTx = (tx: string) => (CHAIN_ID === 1 ? `https://etherscan.io/tx/${tx}` : "#");
+const EXPLORER = "https://explorer.aon.network";
+const aonLink = (hash: string) => `${EXPLORER}?hash=${hash}`;
 const csdTxLink = (txid: string) => (CSD_EXPLORER ? `${CSD_EXPLORER.replace(/\/$/, "")}/tx/${txid}` : "");
 const group = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 function fmtUnits(x: bigint, decimals: number, dp: number) {
@@ -123,15 +125,27 @@ export default function CsdMarketPage() {
     if (!address || !publicClient) return;
     try { setUsdcBal(await publicClient.readContract({ address: CSD_USDC, abi: usdcPermitAbi, functionName: "balanceOf", args: [address] }) as bigint); } catch {}
   }, [address, publicClient]);
-  useEffect(() => { readUsdc(); const id = setInterval(readUsdc, 15000); return () => clearInterval(id); }, [readUsdc]);
-
-  // pending sells: the market maker releases after a CSD block
+  // USDC balance: every 15 s, every 3 s for a minute after a trade
+  const [fastUntil, setFastUntil] = useState(0);
+  const watchUsdc = useCallback(() => { setFastUntil(Date.now() + 60_000); readUsdc(); }, [readUsdc]);
   useEffect(() => {
-    const pending = mine.filter(t => t.side === "sell" && t.status === "pending" && t.csdTxid);
-    if (!pending.length) return;
+    readUsdc();
+    const id = setInterval(readUsdc, Date.now() < fastUntil ? 3000 : 15000);
+    const stop = Date.now() < fastUntil ? setTimeout(() => setFastUntil(0), fastUntil - Date.now()) : undefined;
+    return () => { clearInterval(id); if (stop) clearTimeout(stop); };
+  }, [readUsdc, fastUntil]);
+
+  // Follow trades until their AON receipt is out: sells released, buys settled
+  useEffect(() => {
+    const open = mine.filter(t => !t.receipt && t.status !== "failed" && Date.now() - t.at < 6 * 3600_000 && (t.side === "buy" || t.csdTxid));
+    if (!open.length) return;
     const id = setInterval(async () => {
-      for (const t of pending) {
-        try { const r = await mmGet(`/trade/${t.authHash}`); if (r.releaseTx) { saveTrade({ ...t, releaseTx: r.releaseTx, status: "done" }); readUsdc(); } } catch {}
+      for (const t of open) {
+        try {
+          const r = await mmGet(`/trade/${t.authHash}`);
+          if (t.side === "sell" && r.releaseTx && t.status === "pending") { saveTrade({ ...t, releaseTx: r.releaseTx, status: "done", receipt: r.aon?.receipt }); readUsdc(); }
+          else if (r.aon?.receipt) saveTrade({ ...t, receipt: r.aon.receipt });
+        } catch {}
       }
     }, 10_000);
     return () => clearInterval(id);
@@ -183,7 +197,8 @@ export default function CsdMarketPage() {
       const key = csd.freshKey(w);
       const t = Math.floor(Date.now() / 1000);
       const auth = { buyer: address, sellerUsdcRecipient: fresh.marketMaker, sellerCsdScriptHash: addr20ToBytes32(key.addr20) as Hex, csdGenesisHash: CSD_GENESIS,
-        tradeIntentHash: keccak256(toHex("covenant.market CSD/USDC")), csdAmount: csdAmt, usdc: CSD_USDC, usdcAmount, minConfirmations: CSD_BUY_CONFIRMATIONS,
+        // Names the market maker's published offer, so the authorization links to it on AON
+        tradeIntentHash: (fresh.offers?.sell ?? keccak256(toHex("covenant.market CSD/USDC"))) as Hex, csdAmount: csdAmt, usdc: CSD_USDC, usdcAmount, minConfirmations: CSD_BUY_CONFIRMATIONS,
         csdMaxTarget, executorFeeAmount: feeAmt, validAfter: BigInt(t - 120), validBefore: BigInt(t + 3 * 3600),
         nonce: toHex(crypto.getRandomValues(new Uint8Array(32))) };
       const signature = await signTypedDataAsync({ domain: csdDomain(), types: CSD_AUTH_TYPES, primaryType: "CsdUsdcAuthorization", message: auth });
@@ -205,7 +220,7 @@ export default function CsdMarketPage() {
       setAmount("");
       setBanner({ kind: "ok", text: `Bought ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(usdcAmount + feeAmt)} USDC.`,
         links: [{ href: etherscanTx(r.lockTx), label: "USDC lock" }] });
-      setTimeout(readUsdc, 15000);
+      watchUsdc();
     } catch (e) { setBanner({ kind: "danger", text: errText(e) }); }
     finally { setBusy(null); }
   }
@@ -263,7 +278,7 @@ export default function CsdMarketPage() {
       } else {
         setBanner({ kind: "info", text: `Sold ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(auth.usdcAmount)} USDC. Arriving in a few minutes.` });
       }
-      readUsdc(); setTimeout(csd.refresh, 3000);
+      watchUsdc(); setTimeout(csd.refresh, 3000);
     } catch (e) { setBanner({ kind: "danger", text: errText(e) }); }
     finally { setBusy(null); }
   }
@@ -439,8 +454,8 @@ export default function CsdMarketPage() {
           )}
         </section>
 
-        <section className="card trades-card" aria-label="Your CSD wallet" style={{ padding: "18px 18px", alignContent: "start" }}>
-          <h2 className="panel-title" style={{ fontFamily: "var(--sans)", marginBottom: 12 }}>Your CSD wallet</h2>
+        <section className="card trades-card" aria-label="Your wallet" style={{ padding: "18px 18px", alignContent: "start" }}>
+          <h2 className="panel-title" style={{ fontFamily: "var(--sans)", marginBottom: 12 }}>Your wallet</h2>
           {!isConnected ? (
             <p className="muted">Connect a wallet to see it.</p>
           ) : !csd.ready ? (
@@ -456,6 +471,10 @@ export default function CsdMarketPage() {
                 <div className="stat" style={{ fontSize: 26 }}>{csd.loaded ? fmtCsd(csd.balance) : "…"} <span className="muted" style={{ fontSize: 15 }}>CSD</span></div>
                 {incoming > 0n && <div className="faint">+{fmtCsd(incoming)} CSD arriving</div>}
                 {mid !== null && csd.balance > 0n && <div className="faint">≈ {fmtUsdc((csd.balance * mid) / 100_000_000n)} USDC</div>}
+              </div>
+              <div>
+                <div className="stat-label">USDC</div>
+                <div className="stat" style={{ fontSize: 20 }}>{usdcBal === null ? "…" : fmtUsdc(usdcBal)}</div>
               </div>
               <div>
                 <div className="stat-label">Receive</div>
@@ -506,6 +525,7 @@ export default function CsdMarketPage() {
                     ? <button className="link-btn" onClick={() => refund(t)} disabled={!!busy} title="The market maker didn't deliver in time. Take your USDC back (costs a little ETH).">Refund</button>
                     : t.side === "sell" && t.status === "pending" && t.csdTxid && Date.now() - t.at > 10 * 60_000
                     ? <button className="link-btn" onClick={() => claim(t)} disabled={!!busy} title="The market maker hasn't released it. Claim the USDC yourself with a proof of your CSD payment (costs a little ETH).">Claim</button>
+                    : t.receipt ? <a href={aonLink(t.receipt)} target="_blank" rel="noreferrer">Receipt</a>
                     : (t.releaseTx ?? t.lockTx) && <a href={etherscanTx((t.releaseTx ?? t.lockTx)!)} target="_blank" rel="noreferrer">Tx</a>}</td>
                 </tr>
               ))}

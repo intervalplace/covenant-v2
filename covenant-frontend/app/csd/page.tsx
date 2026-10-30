@@ -472,6 +472,16 @@ export default function CsdMarketPage() {
         if (i > 60) throw new Error("The USDC lock didn't appear on Ethereum. Nothing was sent; you can try again.");
         await sleep(2000);
       }
+      // Locked by a direct call to the settlement contract carrying the maker's signature, so that
+      // anyone (a watchtower) can read the sale from Ethereum and settle it for you if needed
+      {
+        const tx = o.lockTx ? await publicClient.getTransaction({ hash: o.lockTx }).catch(() => null) : null;
+        const rc = o.lockTx ? await publicClient.getTransactionReceipt({ hash: o.lockTx }).catch(() => null) : null;
+        const direct = !!tx && !!rc && rc.status === "success" && tx.to?.toLowerCase() === CSD_SETTLEMENT.toLowerCase()
+          && tx.input.toLowerCase().includes(String(o.signature).slice(2, 132).toLowerCase())
+          && rc.logs.some(l => l.address.toLowerCase() === CSD_SETTLEMENT.toLowerCase() && l.topics[1]?.toLowerCase() === authHash.toLowerCase());
+        if (!direct) throw new Error("The market maker's lock isn't one anyone could settle for you. Nothing was sent.");
+      }
       setBusy("Selling…");
       const p = csd.pay([{ value: csdAmt, addr20: o.csdAddress }], coins);
       // Saved before it's handed over, so the sale can always be claimed with a proof

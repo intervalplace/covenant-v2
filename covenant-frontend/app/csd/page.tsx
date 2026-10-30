@@ -45,6 +45,7 @@ const errText = (e: any) => {
   if (m === "FINISH_YOUR_OTHER_BUY") return "Your previous buy is still being locked. Try again in a few seconds.";
   if (m === "NOT_ENOUGH_USDC") return "Your wallet doesn't have enough USDC for that.";
   if (m === "SLOW_DOWN") return "Too many requests. Wait a minute and try again.";
+  if (m === "ADDRESS_FROM_A_DOUBLE_SPEND") return "This CSD address can't sell right now.";
   if (m.startsWith("COINS_") || m === "NOT_ENOUGH_COINS") return "Some of your CSD is still being confirmed or is tied up in another sale. Try again after the next CSD block.";
   if (m === "FINISH_YOUR_OTHER_SALE" || m === "TOO_MANY_UNPAID_SALES") return "Finish or wait out your other sale first.";
   if (m === "TOO_LATE_TO_PAY") return "That offer expired before your CSD was sent. Nothing was sent; try again.";

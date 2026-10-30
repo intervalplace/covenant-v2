@@ -16,7 +16,9 @@ export const CSD_NODE_URL = (process.env.NEXT_PUBLIC_CSD_NODE_URL ?? "").replace
 // can't get you to accept cheaply faked CSD blocks. Rebuild if CSD's
 // difficulty falls by more than half.
 export const CSD_TARGET_REF = (() => { try { return BigInt(process.env.NEXT_PUBLIC_CSD_TARGET_REF || "0"); } catch { return 0n; } })();
-export const CSD_ENABLED = !!CSD_MM_URL && !!CSD_SETTLEMENT && (CSD_TARGET_REF > 0n || !!CSD_NODE_URL);
+// The market makers whose offers on AON this site trades with (their offers and responses must carry their signature)
+export const CSD_MARKET_MAKERS = (process.env.NEXT_PUBLIC_CSD_MARKET_MAKERS ?? "").split(",").map(s => s.trim()).filter(s => /^0x[0-9a-fA-F]{40}$/.test(s));
+export const CSD_ENABLED = !!CSD_MM_URL && !!CSD_SETTLEMENT && CSD_MARKET_MAKERS.length > 0 && (CSD_TARGET_REF > 0n || !!CSD_NODE_URL);
 // Confirmations the market maker must prove before it is paid for CSD you buy.
 // Only it waits; deeper makes a faked payment more expensive.
 export const CSD_BUY_CONFIRMATIONS = 20n;
@@ -93,7 +95,7 @@ export type CsdMarket = {
   marketMaker: Address; settlement: Address; usdc: Address; chainId: number; csdGenesis: Hex;
   pool: { usdc: string; csd: string }; mid: string; spreadBps: string; feeUsdc: string; bestAsk: string; bestBid: string;
   limits: { minTradeUsdc: string; maxTradeUsdc: string; buyConfirmations: [number, number]; instantRoomUsdc: string };
-  csd: { height: number; bits: number; suggestedMaxTarget: string };
+  csd?: { height: number; bits: number; suggestedMaxTarget: string };
   asks: { price: string; csd: string }[]; bids: { price: string; csd: string }[];
   recent: { side: "buy" | "sell"; csdAmount: string; usdcAmount: string; price: string; at: number }[];
   offers?: { sell?: string; buy?: string };
@@ -101,13 +103,6 @@ export type CsdMarket = {
 
 export async function mmGet<T = any>(path: string): Promise<T> {
   const r = await fetch(`${CSD_MM_URL}/api${path}`, { cache: "no-store" });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
-  return j;
-}
-export async function mmPost<T = any>(path: string, body: any): Promise<T> {
-  const r = await fetch(`${CSD_MM_URL}/api${path}`, { method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify(body, (_, v) => typeof v === "bigint" ? String(v) : v) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
   return j;

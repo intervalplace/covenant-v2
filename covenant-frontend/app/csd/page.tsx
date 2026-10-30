@@ -13,16 +13,19 @@ import { formatUnits, hashTypedData, keccak256, parseUnits, toHex, type Address,
 import { CHAIN_ID } from "@/config";
 import { MarketTabs } from "@/market-tabs";
 import {
-  CSD_ENABLED, CSD_MM_URL, CSD_SETTLEMENT, CSD_USDC, CSD_GENESIS, CSD_BUY_CONFIRMATIONS, CSD_EXPLORER, CSD_NODE_URL, CSD_TARGET_REF, csdSettleAbi, csdRefundAbi,
-  CSD_AUTH_TYPES, PERMIT_TYPES, csdDomain, csdSettlementAbi, usdcPermitAbi, mmGet, mmPost, type CsdMarket,
+  CSD_ENABLED, CSD_MM_URL, CSD_SETTLEMENT, CSD_USDC, CSD_GENESIS, CSD_BUY_CONFIRMATIONS, CSD_EXPLORER, CSD_NODE_URL, CSD_TARGET_REF, CSD_MARKET_MAKERS, csdSettleAbi, csdRefundAbi,
+  CSD_AUTH_TYPES, PERMIT_TYPES, csdDomain, csdSettlementAbi, usdcPermitAbi, mmGet, type CsdMarket,
 } from "@/csd/config";
 import { addr20ToBytes32, csdAddressProof, txToNodeJson, txFromNodeJson, bitsToTarget, csdNode, csdSaleRequestDigest, csdSignDigest, type Hex as CHex, type CsdUtxo } from "@/csd/csd-wallet";
-import { quoteBuy, quoteSell, midPrice, type Pool } from "@/csd/pool";
+import { quoteBuy, quoteSell, midPrice, ladder, type Pool } from "@/csd/pool";
+import { aonApi, buyAuthorizationObject, saleRequestObject, salePaymentObject } from "@/csd/aon-client";
+import { aonFetch } from "@/endpoints";
 import { useCsdWallet } from "@/csd/useCsdWallet";
 
 type Side = "buy" | "sell";
 type MyTrade = { authHash: Hex; side: Side; csdAmount: string; usdcAmount: string; at: number; lockTx?: Hex; csdTxid?: Hex; releaseTx?: Hex;
-  status: "pending" | "done" | "failed"; csdAddress?: Hex; authorization?: any; signature?: Hex; csdTx?: any; lockedUntil?: number; receipt?: string };
+  status: "pending" | "done" | "failed"; csdAddress?: Hex; authorization?: any; signature?: Hex; csdTx?: any; lockedUntil?: number; receipt?: string;
+  aonAuth?: string /* the trade's authorization object on AON */ };
 type Banner = { kind: "info" | "ok" | "danger"; text: string; links?: { href: string; label: string }[] } | null;
 
 const etherscanTx = (tx: string) => (CHAIN_ID === 1 ? `https://etherscan.io/tx/${tx}` : "#");
@@ -44,6 +47,9 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const errText = (e: any) => {
   const m = String(e?.shortMessage ?? e?.message ?? e);
   if (/User rejected|denied/i.test(m)) return "You cancelled in your wallet. Nothing was traded.";
+  if (m === "NO_OFFER") return "The market maker isn't quoting right now. Try again shortly.";
+  if (m === "NO_RESPONSE") return "The market maker didn't answer. Nothing was traded.";
+  if (m === "NO_RESPONSE_BUY") return "No answer from the market maker yet. If it takes the trade, it shows up in Your trades; otherwise nothing happens.";
   if (m === "SELLS_PAUSED") return "Selling is paused for a little while. Try again later.";
   if (m === "FINISH_YOUR_OTHER_BUY") return "Your previous buy is still being locked. Try again in a few seconds.";
   if (m === "NOT_ENOUGH_USDC") return "Your wallet doesn't have enough USDC for that.";
@@ -85,6 +91,33 @@ async function minSellTarget(): Promise<bigint> {
 }
 const work = (target: bigint) => (1n << 256n) / (target + 1n);
 
+// Trading goes over AON (with the site's node failover): offers, requests, responses
+const aon = aonApi("", ((u: any, i: any) => aonFetch(String(u), i)) as typeof fetch);
+type Market = CsdMarket & { sellOffer: any; buyOffer: any };
+// The market from the market makers' signed offers on AON; recent trades from the market maker's API if it's reachable
+async function loadMarket(): Promise<Market> {
+  const off = await aon.offers(CSD_MARKET_MAKERS);
+  const ours = (o: any) => o && String(o.payload.settlementContract).toLowerCase() === CSD_SETTLEMENT.toLowerCase()
+    && String(o.payload.usdc).toLowerCase() === CSD_USDC.toLowerCase() && String(o.payload.csdGenesisHash).toLowerCase() === CSD_GENESIS.toLowerCase();
+  if (!ours(off.sell) || !ours(off.buy)) throw new Error("NO_OFFER");
+  const P = off.sell.payload, p: Pool = { usdc: BigInt(P.poolUsdc), csd: BigInt(P.poolCsd), spreadBps: BigInt(P.spreadBps) };
+  const l = ladder(p, 5_000_000n, 8);
+  let recent: CsdMarket["recent"] = [];
+  try { recent = (await mmGet<CsdMarket>("/market")).recent ?? []; } catch {}
+  return { marketMaker: P.marketMaker, settlement: P.settlementContract, usdc: P.usdc, chainId: CHAIN_ID, csdGenesis: P.csdGenesisHash,
+    pool: { usdc: P.poolUsdc, csd: P.poolCsd }, mid: String(midPrice(p)), spreadBps: P.spreadBps, feeUsdc: P.feeUsdc,
+    bestAsk: String(quoteBuy(p, 100_000_000n)), bestBid: String(quoteSell(p, 100_000_000n)),
+    limits: { minTradeUsdc: P.minTradeUsdc, maxTradeUsdc: P.maxTradeUsdc, buyConfirmations: [10, 30], instantRoomUsdc: "0" },
+    asks: l.asks.map(x => ({ price: String(x.price), csd: String(x.csd) })), bids: l.bids.map(x => ({ price: String(x.price), csd: String(x.csd) })),
+    recent, offers: { sell: off.sell.objectHash, buy: off.buy.objectHash }, sellOffer: off.sell, buyOffer: off.buy };
+}
+// The market maker's signed answer to one of our objects
+async function answer(objectHash: string, marketMaker: string) {
+  const r = await aon.response(objectHash, marketMaker);
+  if (!r.accepted) throw new Error(r.error ?? "DECLINED");
+  return r;
+}
+
 export default function CsdMarketPage() {
   const { address, isConnected, chainId } = useAccount();
   const { connect } = useConnect();
@@ -92,7 +125,7 @@ export default function CsdMarketPage() {
   const { signTypedDataAsync } = useSignTypedData();
   const { writeContractAsync } = useWriteContract();
   const csd = useCsdWallet(address);
-  const [m, setM] = useState<CsdMarket | null>(null);
+  const [m, setM] = useState<Market | null>(null);
   const [mErr, setMErr] = useState("");
   const [side, setSide] = useState<Side>("buy");
   const [amount, setAmount] = useState("");
@@ -109,7 +142,7 @@ export default function CsdMarketPage() {
   useEffect(() => {
     if (!CSD_ENABLED) return;
     let live = true;
-    const load = () => mmGet<CsdMarket>("/market").then(x => { if (live) { setM(x); setMErr(""); } }).catch(e => live && setMErr(e.message));
+    const load = () => loadMarket().then(x => { if (live) { setM(x); setMErr(""); } }).catch(e => live && setMErr(e.message));
     load(); const id = setInterval(load, 5000);
     return () => { live = false; clearInterval(id); };
   }, []);
@@ -142,10 +175,13 @@ export default function CsdMarketPage() {
     if (!open.length) return;
     const id = setInterval(async () => {
       for (const t of open) {
+        if (!t.aonAuth) continue;
         try {
-          const r = await mmGet(`/trade/${t.authHash}`);
-          if (t.side === "sell" && r.releaseTx && t.status === "pending") { saveTrade({ ...t, releaseTx: r.releaseTx, status: "done", receipt: r.aon?.receipt }); readUsdc(); }
-          else if (r.aon?.receipt) saveTrade({ ...t, receipt: r.aon.receipt });
+          // The market maker's receipt references the trade's authorization
+          const rc = (await aon.inbound(t.aonAuth)).find(o => o.objectType === "receipt" && String(o.payload?.authHash).toLowerCase() === t.authHash.toLowerCase());
+          if (!rc) continue;
+          if (t.side === "sell" && t.status === "pending") { saveTrade({ ...t, releaseTx: rc.payload.executionTx, status: "done", receipt: rc.objectHash }); readUsdc(); }
+          else saveTrade({ ...t, receipt: rc.objectHash });
         } catch {}
       }
     }, 10_000);
@@ -188,18 +224,17 @@ export default function CsdMarketPage() {
       let w = csd.wallet;
       if (!w) { setBusy("Confirm in your wallet…"); w = await csd.setup(remember); }
       setBusy("Confirm in your wallet (1/2)…");
-      const fresh = await mmGet<CsdMarket>("/market"); setM(fresh);
+      const fresh = await loadMarket(); setM(fresh);
       const p = { usdc: BigInt(fresh.pool.usdc), csd: BigInt(fresh.pool.csd), spreadBps: BigInt(fresh.spreadBps) };
       const usdcAmount = quoteBuy(p, csdAmt), feeAmt = BigInt(fresh.feeUsdc);
       if (usdcAmount + feeAmt > preview.total * 1005n / 1000n) throw new Error(`PRICE_MOVED`);
-      // Never sign an easier difficulty than the site's own bound, whatever the market maker suggests
-      const cap = await maxBuyTarget(), suggested = BigInt(fresh.csd.suggestedMaxTarget);
-      const csdMaxTarget = suggested < cap ? suggested : cap;
+      // The difficulty comes from the site's own bound, not from the market maker
+      const csdMaxTarget = await maxBuyTarget();
       const key = csd.freshKey(w);
       const t = Math.floor(Date.now() / 1000);
       const auth = { buyer: address, sellerUsdcRecipient: fresh.marketMaker, sellerCsdScriptHash: addr20ToBytes32(key.addr20) as Hex, csdGenesisHash: CSD_GENESIS,
         // Names the market maker's published offer, so the authorization links to it on AON
-        tradeIntentHash: (fresh.offers?.sell ?? keccak256(toHex("covenant.market CSD/USDC"))) as Hex, csdAmount: csdAmt, usdc: CSD_USDC, usdcAmount, minConfirmations: CSD_BUY_CONFIRMATIONS,
+        tradeIntentHash: fresh.sellOffer.objectHash as Hex, csdAmount: csdAmt, usdc: CSD_USDC, usdcAmount, minConfirmations: CSD_BUY_CONFIRMATIONS,
         csdMaxTarget, executorFeeAmount: feeAmt, validAfter: BigInt(t - 120), validBefore: BigInt(t + 3 * 3600),
         nonce: toHex(crypto.getRandomValues(new Uint8Array(32))) };
       const signature = await signTypedDataAsync({ domain: csdDomain(), types: CSD_AUTH_TYPES, primaryType: "CsdUsdcAuthorization", message: auth });
@@ -214,13 +249,20 @@ export default function CsdMarketPage() {
       const ps = await signTypedDataAsync({ domain: { name, version, chainId: CHAIN_ID, verifyingContract: CSD_USDC }, types: PERMIT_TYPES, primaryType: "Permit",
         message: { owner: address, spender: CSD_SETTLEMENT, value: usdcAmount + feeAmt, nonce, deadline } });
       setBusy("Buying…");
-      const r = await mmPost("/buy", { authorization: auth, signature, addressProof: csdAddressProof(key, authHash as CHex),
-        permit: { deadline, r: ps.slice(0, 66), s: "0x" + ps.slice(66, 130), v: parseInt(ps.slice(130, 132), 16) } });
-      saveTrade({ authHash, side: "buy", csdAmount: String(csdAmt), usdcAmount: String(usdcAmount + feeAmt), at: Date.now(), lockTx: r.lockTx, status: "pending", csdAddress: key.addr20 as Hex,
-        authorization: Object.fromEntries(Object.entries(auth).map(([k, v]) => [k, String(v)])), signature });
+      // Published on AON, referencing the offer; the market maker answers there
+      const obj = buyAuthorizationObject({ offerHash: fresh.sellOffer.objectHash, authorization: auth, signature, domain: csdDomain(), types: CSD_AUTH_TYPES,
+        addressProof: csdAddressProof(key, authHash as CHex), permit: { deadline, r: ps.slice(0, 66) as Hex, s: ("0x" + ps.slice(66, 130)) as Hex, v: parseInt(ps.slice(130, 132), 16) } });
+      const trade: MyTrade = { authHash, side: "buy", csdAmount: String(csdAmt), usdcAmount: String(usdcAmount + feeAmt), at: Date.now(), status: "pending", csdAddress: key.addr20 as Hex,
+        authorization: Object.fromEntries(Object.entries(auth).map(([k, v]) => [k, String(v)])), signature, aonAuth: obj.objectHash };
+      await aon.put(obj);
+      saveTrade(trade); // (so it's followed even if the answer is slow)
+      let r: any;
+      try { r = await answer(obj.objectHash!, fresh.marketMaker); }
+      catch (e: any) { if (e.message === "NO_RESPONSE") throw new Error("NO_RESPONSE_BUY"); saveTrade({ ...trade, status: "failed" }); throw e; }
+      saveTrade({ ...trade, lockTx: r.lockTx });
       setAmount("");
       setBanner({ kind: "ok", text: `Bought ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(usdcAmount + feeAmt)} USDC.`,
-        links: [{ href: etherscanTx(r.lockTx), label: "USDC lock" }] });
+        links: r.lockTx ? [{ href: etherscanTx(r.lockTx), label: "USDC lock" }] : [] });
       watchUsdc();
     } catch (e) { setBanner({ kind: "danger", text: errText(e) }); }
     finally { setBusy(null); }
@@ -233,13 +275,17 @@ export default function CsdMarketPage() {
       if (!csd.wallet) { setBusy("Confirm in your wallet…"); await csd.setup(remember); setBusy(null); return; }
       setBusy("Selling…");
       const minOut = preview.usdc * 995n / 1000n;
+      const fresh = await loadMarket(); setM(fresh);
       // Name the exact coins this sale will be paid with, signed by their keys
       const pick = csd.pay([{ value: csdAmt, addr20: ("0x" + "00".repeat(20)) as Hex }]);
       const coins = pick.spent.map(sp => csd.coins.find(c => c.txid === sp.txid && c.vout === sp.vout)!) as CsdUtxo[];
       const req = { csdAmount: csdAmt, usdcRecipient: address, validUntil: Math.floor(Date.now() / 1000) + 300, coins: coins.map(c => ({ txid: c.txid, vout: c.vout })) };
       const digest = csdSaleRequestDigest(req);
       const signers = [...new Map(coins.map(c => [c.key.addr20, c.key])).values()];
-      const o = await mmPost("/sell/open", { ...req, minUsdcOut: minOut, proofs: signers.map(k => csdSignDigest(k, digest)) });
+      const reqObj = saleRequestObject({ offerHash: fresh.buyOffer.objectHash, csdAmount: csdAmt, usdcRecipient: address, minUsdcOut: minOut, validUntil: req.validUntil,
+        coins: req.coins as any, proofs: signers.map(k => csdSignDigest(k, digest)), owners: signers.map(k => k.addr20) });
+      await aon.put(reqObj);
+      const o = await answer(reqObj.objectHash!, fresh.marketMaker);
       // Check everything ourselves before any CSD leaves the wallet
       const a = o.authorization ?? {};
       const auth = { ...a, csdAmount: BigInt(a.csdAmount), usdcAmount: BigInt(a.usdcAmount), minConfirmations: BigInt(a.minConfirmations), csdMaxTarget: BigInt(a.csdMaxTarget),
@@ -252,7 +298,7 @@ export default function CsdMarketPage() {
         && auth.minConfirmations <= 20n && auth.csdMaxTarget >= await minSellTarget()
         && auth.sellerCsdScriptHash?.toLowerCase() === addr20ToBytes32(o.csdAddress).toLowerCase();
       if (!ok) throw new Error("The market maker's offer didn't match what you asked for. Nothing was sent.");
-      saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, status: "pending", authorization: a, signature: o.signature });
+      saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, status: "pending", authorization: a, signature: o.signature, aonAuth: o.aon?.auth });
       setBusy("Selling…");
       for (let i = 0; ; i++) {
         const [locked, until] = await Promise.all([
@@ -266,11 +312,13 @@ export default function CsdMarketPage() {
       setBusy("Selling…");
       const p = csd.pay([{ value: csdAmt, addr20: o.csdAddress }], coins);
       // Saved before it's handed over, so the sale can always be claimed with a proof
-      saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, status: "pending", authorization: a, signature: o.signature, csdTx: txToNodeJson(p.tx) });
-      const r = await mmPost("/sell/pay", { authHash, tx: txToNodeJson(p.tx) });
+      saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, status: "pending", authorization: a, signature: o.signature, csdTx: txToNodeJson(p.tx), aonAuth: o.aon?.auth });
+      const payObj = salePaymentObject({ authorizationObjectHash: o.aon?.auth, csdTxid: p.txid, csdTx: txToNodeJson(p.tx) });
+      await aon.put(payObj);
+      const r = await answer(payObj.objectHash!, fresh.marketMaker);
       independentNode?.submit(p.tx).catch(() => {}); // also broadcast it ourselves, not only through the market maker
       csd.spentLocally(new Set(p.spent.map(s => s.txid)));
-      saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, releaseTx: r.releaseTx, status: r.releaseTx ? "done" : "pending", authorization: a, signature: o.signature, csdTx: txToNodeJson(p.tx) });
+      saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, releaseTx: r.releaseTx, status: r.releaseTx ? "done" : "pending", authorization: a, signature: o.signature, csdTx: txToNodeJson(p.tx), aonAuth: o.aon?.auth });
       setAmount("");
       if (r.releaseTx) {
         setBusy("Selling…");

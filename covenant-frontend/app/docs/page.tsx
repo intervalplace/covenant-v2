@@ -51,6 +51,13 @@ export default function Docs() {
         {" "}{code("aon:csd-usdc")} namespace. Prices come from the market maker&apos;s
         pool: buying moves the price up, selling moves it down. Trades are 1–30 USDC for now.
       </p>
+      <p className="muted" style={{ marginTop: 10 }}>
+        The whole trade happens on AON. The market maker publishes signed offers;
+        your signed authorization (or sale request, then payment) is published
+        referencing the offer; the market maker answers with signed responses and
+        a receipt. The page only accepts offers and answers signed by the market
+        maker&apos;s address, and anyone can follow a trade on the explorer.
+      </p>
 
       <h3 id="csd-wallet" style={{ marginTop: 24 }}>Your CSD wallet</h3>
       <p className="muted" style={{ marginTop: 10 }}>

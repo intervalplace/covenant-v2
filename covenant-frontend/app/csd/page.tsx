@@ -171,8 +171,8 @@ export default function CsdMarketPage() {
     setBanner(null);
     try {
       let w = csd.wallet;
-      if (!w) { setBusy("Setting up your CSD wallet…"); w = await csd.setup(remember); }
-      setBusy("Sign the trade in your wallet (1 of 2)…");
+      if (!w) { setBusy("Confirm in your wallet…"); w = await csd.setup(remember); }
+      setBusy("Confirm in your wallet (1/2)…");
       const fresh = await mmGet<CsdMarket>("/market"); setM(fresh);
       const p = { usdc: BigInt(fresh.pool.usdc), csd: BigInt(fresh.pool.csd), spreadBps: BigInt(fresh.spreadBps) };
       const usdcAmount = quoteBuy(p, csdAmt), feeAmt = BigInt(fresh.feeUsdc);
@@ -188,7 +188,7 @@ export default function CsdMarketPage() {
         nonce: toHex(crypto.getRandomValues(new Uint8Array(32))) };
       const signature = await signTypedDataAsync({ domain: csdDomain(), types: CSD_AUTH_TYPES, primaryType: "CsdUsdcAuthorization", message: auth });
       const authHash = hashTypedData({ domain: csdDomain(), types: CSD_AUTH_TYPES, primaryType: "CsdUsdcAuthorization", message: auth });
-      setBusy("Approve the USDC with a free signature (2 of 2)…");
+      setBusy("Confirm in your wallet (2/2)…");
       const [name, version, nonce] = await Promise.all([
         publicClient.readContract({ address: CSD_USDC, abi: usdcPermitAbi, functionName: "name" }),
         publicClient.readContract({ address: CSD_USDC, abi: usdcPermitAbi, functionName: "version" }),
@@ -197,13 +197,13 @@ export default function CsdMarketPage() {
       const deadline = BigInt(t + 300); // short: if this trade doesn't happen now, the permit can't be used later
       const ps = await signTypedDataAsync({ domain: { name, version, chainId: CHAIN_ID, verifyingContract: CSD_USDC }, types: PERMIT_TYPES, primaryType: "Permit",
         message: { owner: address, spender: CSD_SETTLEMENT, value: usdcAmount + feeAmt, nonce, deadline } });
-      setBusy("Locking your USDC and sending the CSD…");
+      setBusy("Buying…");
       const r = await mmPost("/buy", { authorization: auth, signature, addressProof: csdAddressProof(key, authHash as CHex),
         permit: { deadline, r: ps.slice(0, 66), s: "0x" + ps.slice(66, 130), v: parseInt(ps.slice(130, 132), 16) } });
       saveTrade({ authHash, side: "buy", csdAmount: String(csdAmt), usdcAmount: String(usdcAmount + feeAmt), at: Date.now(), lockTx: r.lockTx, status: "pending", csdAddress: key.addr20 as Hex,
         authorization: Object.fromEntries(Object.entries(auth).map(([k, v]) => [k, String(v)])), signature });
       setAmount("");
-      setBanner({ kind: "ok", text: `Bought ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(usdcAmount + feeAmt)} USDC. The CSD is sent as soon as your USDC lock is on Ethereum (a few seconds), and can be spent after its first CSD block (about 2 minutes). Your USDC is held by the contract until the market maker proves the payment, or comes back to you.`,
+      setBanner({ kind: "ok", text: `Bought ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(usdcAmount + feeAmt)} USDC.`,
         links: [{ href: etherscanTx(r.lockTx), label: "USDC lock" }] });
       setTimeout(readUsdc, 15000);
     } catch (e) { setBanner({ kind: "danger", text: errText(e) }); }
@@ -214,8 +214,8 @@ export default function CsdMarketPage() {
     if (!address || !publicClient || !m || !preview) return;
     setBanner(null);
     try {
-      if (!csd.wallet) { setBusy("Setting up your CSD wallet…"); await csd.setup(remember); setBusy(null); return; }
-      setBusy("Asking the market maker to lock your USDC…");
+      if (!csd.wallet) { setBusy("Confirm in your wallet…"); await csd.setup(remember); setBusy(null); return; }
+      setBusy("Selling…");
       const minOut = preview.usdc * 995n / 1000n;
       // Name the exact coins this sale will be paid with, signed by their keys
       const pick = csd.pay([{ value: csdAmt, addr20: ("0x" + "00".repeat(20)) as Hex }]);
@@ -237,7 +237,7 @@ export default function CsdMarketPage() {
         && auth.sellerCsdScriptHash?.toLowerCase() === addr20ToBytes32(o.csdAddress).toLowerCase();
       if (!ok) throw new Error("The market maker's offer didn't match what you asked for. Nothing was sent.");
       saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, status: "pending", authorization: a, signature: o.signature });
-      setBusy("Waiting for the USDC lock on Ethereum…");
+      setBusy("Selling…");
       for (let i = 0; ; i++) {
         const [locked, until] = await Promise.all([
           publicClient.readContract({ address: CSD_SETTLEMENT, abi: csdSettlementAbi, functionName: "usdcLocked", args: [authHash] }),
@@ -247,7 +247,7 @@ export default function CsdMarketPage() {
         if (i > 60) throw new Error("The USDC lock didn't appear on Ethereum. Nothing was sent; you can try again.");
         await sleep(2000);
       }
-      setBusy("Sending your CSD…");
+      setBusy("Selling…");
       const p = csd.pay([{ value: csdAmt, addr20: o.csdAddress }], coins);
       // Saved before it's handed over, so the sale can always be claimed with a proof
       saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, status: "pending", authorization: a, signature: o.signature, csdTx: txToNodeJson(p.tx) });
@@ -257,11 +257,11 @@ export default function CsdMarketPage() {
       saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, releaseTx: r.releaseTx, status: r.releaseTx ? "done" : "pending", authorization: a, signature: o.signature, csdTx: txToNodeJson(p.tx) });
       setAmount("");
       if (r.releaseTx) {
-        setBusy("Releasing your USDC…");
+        setBusy("Selling…");
         await publicClient.waitForTransactionReceipt({ hash: r.releaseTx }).catch(() => {});
-        setBanner({ kind: "ok", text: `Sold ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(auth.usdcAmount)} USDC. It's in your wallet.`, links: [{ href: etherscanTx(r.releaseTx), label: "Transaction" }] });
+        setBanner({ kind: "ok", text: `Sold ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(auth.usdcAmount)} USDC.`, links: [{ href: etherscanTx(r.releaseTx), label: "Transaction" }] });
       } else {
-        setBanner({ kind: "info", text: `Sold ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(auth.usdcAmount)} USDC. The market maker is releasing it after the next CSD block, in about 2 minutes. It's locked for you on Ethereum in the meantime.` });
+        setBanner({ kind: "info", text: `Sold ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(auth.usdcAmount)} USDC. Arriving in a few minutes.` });
       }
       readUsdc(); setTimeout(csd.refresh, 3000);
     } catch (e) { setBanner({ kind: "danger", text: errText(e) }); }
@@ -272,7 +272,7 @@ export default function CsdMarketPage() {
   // with a proof of your CSD payment (you pay the Ethereum gas)
   async function claim(t: MyTrade) {
     if (!t.authorization || !t.signature || !t.csdTxid || !publicClient) return;
-    setBanner(null); setBusy("Building the proof of your CSD payment…");
+    setBanner(null); setBusy("Claiming…");
     try {
       const a = t.authorization, conf = Number(a.minConfirmations);
       const base = CSD_NODE_URL || `${CSD_MM_URL}/api/csd`;
@@ -323,7 +323,7 @@ export default function CsdMarketPage() {
     const to = sendTo.trim().replace(/^0x/, "").toLowerCase(), v = parseCsd(sendAmt);
     if (!/^[0-9a-f]{40}$/.test(to)) { setBanner({ kind: "danger", text: "A CSD address is 40 hexadecimal characters." }); return; }
     if (v <= 0n) { setBanner({ kind: "danger", text: "Enter an amount to send." }); return; }
-    setBusy("Sending CSD…");
+    setBusy("Sending…");
     try {
       const txid = await csd.send(("0x" + to) as Hex, v);
       setSendTo(""); setSendAmt("");
@@ -356,18 +356,15 @@ export default function CsdMarketPage() {
     <main style={{ maxWidth: 1240, margin: "0 auto", padding: "0 24px" }}>
       <section className="hero" style={{ gridTemplateColumns: "1fr", paddingBottom: 12 }}>
         <div>
-          <h1 className="hero-title">CSD for USDC, as fast as a swap.</h1>
-          <p className="hero-sub">
-            Buy or sell Compute Substrate with USDC on Ethereum. No ETH needed, nothing to wait for.
-            Your USDC is held by the contract until the CSD is proven, or it comes back to you.
-          </p>
+          <h1 className="hero-title">Trade CSD for USDC.</h1>
+          <p className="hero-sub">Straight from your wallet. No account, no deposit.</p>
         </div>
       </section>
 
       {!CSD_ENABLED && (
         <div className="banner banner-warn"><strong className="warn">Coming soon</strong><span className="muted">The CSD/USDC market isn't live yet.</span></div>
       )}
-      {mErr && <div className="banner banner-danger"><strong className="danger">Can't reach the market maker</strong><span className="muted">Prices may be out of date. Retrying automatically.</span></div>}
+      {mErr && <div className="banner banner-danger"><strong className="danger">Offline</strong><span className="muted">Retrying…</span></div>}
       {banner && (
         <div className={`banner banner-${banner.kind === "danger" ? "danger" : banner.kind}`} role="status">
           <span>{banner.text}{banner.links?.map(l => <span key={l.href}>{" "}<a href={l.href} target="_blank" rel="noreferrer">{l.label}</a></span>)}</span>
@@ -378,21 +375,16 @@ export default function CsdMarketPage() {
       <div className="market-bar">
         <MarketTabs active="CSD-USDC" />
         <div className="market-stats">
-          <div title="The market maker's price: the USDC it holds divided by the CSD it holds"><div className="stat-label">Price</div><div className="stat">{mid !== null ? fmtPx(mid) : "—"}</div></div>
+          <div><div className="stat-label">Price</div><div className="stat">{mid !== null ? fmtPx(mid) : "—"}</div></div>
           <div><div className="stat-label">Best bid</div><div className="stat buy">{m ? fmtPx(BigInt(m.bestBid)) : "—"}</div></div>
           <div><div className="stat-label">Best ask</div><div className="stat sell">{m ? fmtPx(BigInt(m.bestAsk)) : "—"}</div></div>
-          <div title="Buying: the CSD is sent at once. Selling: two Ethereum blocks."><div className="stat-label">Trade time</div><div className="stat">&lt; 30 s</div></div>
         </div>
       </div>
-      <p className="market-note">
-        Prices come from a market maker&apos;s pool: buying moves the price up, selling moves it down. Trades are 1–30 USDC for now.
-      </p>
 
       <div className="exchange-grid">
         <section className="card" aria-label="Order book" style={{ padding: "18px 14px" }}>
           <div className="row-between" style={{ margin: "0 6px 12px" }}>
             <h2 className="panel-title" style={{ fontFamily: "var(--sans)" }}>Order book</h2>
-            <span className="faint">Tap a price to trade it</span>
           </div>
           <div className="book-head"><span>Price (USDC)</span><span>Size (CSD)</span><span>Total (USDC)</span></div>
           {!m ? <div className="book-empty">{mErr ? "Unavailable right now." : "Loading the book…"}</div> : (
@@ -400,7 +392,6 @@ export default function CsdMarketPage() {
               <div className="book-side book-asks">{[...asks].map((l, i) => ({ l, i })).reverse().map(({ l, i }) => row(l, i, "sell", asks))}</div>
               <div className="book-spread">
                 <span className="last">{mid !== null ? fmtPx(mid) : "—"}</span>
-                <span className="faint">Spread {Number(m.spreadBps) / 100}% each side</span>
               </div>
               <div className="book-side">{bids.map((l, i) => row(l, i, "buy", bids))}</div>
             </>
@@ -431,21 +422,11 @@ export default function CsdMarketPage() {
               <span className="muted">{side === "buy" ? "You pay" : "You receive"}</span>
               <span>{preview ? `${fmtUsdc(side === "buy" ? preview.total : preview.usdc)} USDC` : "—"}</span>
             </div>
-            {preview && <div className="faint">{fmtPx((preview.usdc + (side === "buy" ? 0n : fee)) * 100_000_000n / csdAmt)} USDC per CSD, {side === "buy" ? "plus" : "after"} a {fmtUsdc(fee)} USDC fee that covers the Ethereum gas</div>}
+            {preview && <div className="faint">Includes a {fmtUsdc(fee)} USDC fee</div>}
             <div className="row-between">
               <span className="muted">Available</span>
               <span>{!isConnected ? "Connect a wallet to see" : side === "buy" ? (usdcBal === null ? "…" : `${fmtUsdc(usdcBal)} USDC`) : csd.ready ? `${fmtCsd(csd.balance)} CSD` : "Open your CSD wallet"}</span>
             </div>
-          </div>
-          <div aria-live="polite">
-            {preview && !problem ? (
-              <div className="clause">
-                {side === "buy"
-                  ? `I buy ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(preview.total)} USDC, paid into my Covenant CSD wallet. My USDC is held by the settlement contract and goes to the market maker only when it proves on Ethereum that it paid me; otherwise it comes back to me.`
-                  : `I sell ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(preview.usdc)} USDC. The market maker locks the USDC for me on Ethereum first; my CSD is sent only once that lock is there.`}
-                <div className="clause-sign"><span>{isConnected ? `Signed by ${address!.slice(0, 6)}…${address!.slice(-4)}` : "Signed by your wallet"}</span><span className="sig-line" /></div>
-              </div>
-            ) : (!problem && <p className="clause-empty">Enter an amount to see the exact terms.</p>)}
           </div>
           {problem && <div className="form-problem danger" role="alert">{problem}</div>}
           {!isConnected ? (
@@ -453,25 +434,18 @@ export default function CsdMarketPage() {
           ) : (
             <button className={`btn-lg ${side === "buy" ? "btn-buy" : "btn-sell"}`} onClick={side === "buy" ? buy : sell}
               disabled={!!busy || !CSD_ENABLED || wrongChain || (csd.ready && (!preview || !!problem))}>
-              {busy ?? (wrongChain ? "Switch to Ethereum to trade" : !csd.ready ? "Open your CSD wallet" : side === "buy" ? "Sign and buy CSD" : "Sell CSD")}
+              {busy ?? (wrongChain ? "Switch to Ethereum" : !csd.ready ? "Open your CSD wallet" : side === "buy" ? "Buy CSD" : "Sell CSD")}
             </button>
           )}
-          <p className="faint" style={{ lineHeight: 1.5 }}>
-            {side === "buy"
-              ? "Two free signatures: the trade and a USDC permit. No approval transaction and no ETH needed."
-              : "No signature needed: your CSD wallet pays once the USDC is locked for you. The USDC arrives in about half a minute."}
-          </p>
         </section>
 
         <section className="card trades-card" aria-label="Your CSD wallet" style={{ padding: "18px 18px", alignContent: "start" }}>
           <h2 className="panel-title" style={{ fontFamily: "var(--sans)", marginBottom: 12 }}>Your CSD wallet</h2>
           {!isConnected ? (
-            <p className="muted" style={{ lineHeight: 1.5 }}>Connect your Ethereum wallet to open your CSD wallet.</p>
+            <p className="muted">Connect a wallet to see it.</p>
           ) : !csd.ready ? (
             <div className="col" style={{ gap: 12 }}>
-              <p className="muted" style={{ lineHeight: 1.5 }}>
-                Your CSD wallet is made from a signature by your Ethereum wallet, so the same Ethereum wallet opens it on any device. Your wallet asks you to sign twice the first time, to check it gives the same keys every time.
-              </p>
+              <p className="muted">Created from your Ethereum wallet, so it's yours on any device.</p>
               <label className="check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} /><span>Remember on this device</span></label>
               <button className="btn" onClick={() => csd.setup(remember).catch(e => setBanner({ kind: "danger", text: errText(e) }))} disabled={!!busy}>Open CSD wallet</button>
             </div>
@@ -480,7 +454,7 @@ export default function CsdMarketPage() {
               <div>
                 <div className="stat-label">Balance</div>
                 <div className="stat" style={{ fontSize: 26 }}>{csd.loaded ? fmtCsd(csd.balance) : "…"} <span className="muted" style={{ fontSize: 15 }}>CSD</span></div>
-                {incoming > 0n && <div className="faint">+{fmtCsd(incoming)} CSD on its way, spendable after its first CSD block</div>}
+                {incoming > 0n && <div className="faint">+{fmtCsd(incoming)} CSD arriving</div>}
                 {mid !== null && csd.balance > 0n && <div className="faint">≈ {fmtUsdc((csd.balance * mid) / 100_000_000n)} USDC</div>}
               </div>
               <div>
@@ -489,7 +463,7 @@ export default function CsdMarketPage() {
                   onClick={() => { navigator.clipboard?.writeText(csd.main!.addr20.slice(2)); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
                   {csd.main!.addr20.slice(2)}
                 </button>
-                <div className="faint">{copied ? "Copied." : "Send CSD here from any CSD wallet."}</div>
+                {copied && <div className="faint">Copied</div>}
               </div>
               <details>
                 <summary className="link-btn" style={{ cursor: "pointer" }}>Send CSD</summary>
@@ -499,11 +473,8 @@ export default function CsdMarketPage() {
                   <button className="btn-secondary" onClick={sendCsd} disabled={!!busy}>Send</button>
                 </div>
               </details>
-              <p className="faint" style={{ lineHeight: 1.5 }}>
-                A wallet for trading, kept in this browser. Keep larger amounts in your own CSD wallet.{" "}
-                <button className="link-btn faint" onClick={csd.forget}>Forget on this device</button>
-              </p>
-              {csd.error && <div className="danger" style={{ fontSize: 14 }}>Can&apos;t reach the CSD network: {csd.error}</div>}
+              <button className="link-btn faint" style={{ justifySelf: "start" }} onClick={csd.forget}>Forget on this device</button>
+              {csd.error && <div className="danger" style={{ fontSize: 14 }}>CSD network unreachable</div>}
             </div>
           )}
         </section>
@@ -530,7 +501,7 @@ export default function CsdMarketPage() {
                   <td className={t.side}>{t.side === "buy" ? "Bought" : "Sold"}</td>
                   <td>{fmtCsd(BigInt(t.csdAmount))} CSD</td>
                   <td>{fmtUsdc(BigInt(t.usdcAmount))} USDC</td>
-                  <td className="muted">{t.status === "pending" ? (t.side === "buy" ? "CSD on its way" : "Releasing") : new Date(t.at).toLocaleDateString()}</td>
+                  <td className="muted">{t.status === "pending" ? "Pending" : new Date(t.at).toLocaleDateString()}</td>
                   <td>{t.side === "buy" && t.status === "pending" && t.authorization && Date.now() - t.at > (10 + 5 * Number(t.authorization.minConfirmations) + 2) * 60_000
                     ? <button className="link-btn" onClick={() => refund(t)} disabled={!!busy} title="The market maker didn't deliver in time. Take your USDC back (costs a little ETH).">Refund</button>
                     : t.side === "sell" && t.status === "pending" && t.csdTxid && Date.now() - t.at > 10 * 60_000
@@ -542,10 +513,6 @@ export default function CsdMarketPage() {
           )}
         </section>
       </div>
-      <p className="faint" style={{ margin: "18px 4px 8px", lineHeight: 1.5 }}>
-        Market maker: {CSD_MM_URL ? new URL(CSD_MM_URL).host : "not set"}. Settlement contract: {CSD_SETTLEMENT || "not set"}.
-        The market maker can&apos;t take your funds: buying, your USDC is released only against an on-chain proof of your CSD; selling, your CSD is sent only after the USDC is locked for you.
-      </p>
     </main>
   );
 }

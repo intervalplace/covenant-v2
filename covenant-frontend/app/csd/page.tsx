@@ -49,7 +49,7 @@ const errText = (e: any) => {
   if (/User rejected|denied/i.test(m)) return "You cancelled in your wallet. Nothing was traded.";
   if (m === "NO_OFFER") return "No market maker is quoting right now. Try again shortly.";
   if (m === "MARKET_FULL") return "The market is at its limit for open trades right now (all trades together are capped while they settle). Nothing was traded; try again shortly.";
-  if (m === "TRY_ANOTHER_MAKER") return "That market maker couldn't take it right now. Nothing was traded; try again and it goes to the next best one.";
+  if (m === "TRY_ANOTHER_MAKER") return "That market maker couldn't take it right now, so nothing was traded. Try again in a minute or two.";
   if (m === "NO_RESPONSE") return "The market maker didn't answer. Nothing was traded.";
   if (m === "NO_RESPONSE_BUY") return "No answer from the market maker yet. If it takes the trade, it shows up in Your trades; otherwise nothing happens.";
   if (m === "SELLS_PAUSED") return "Selling is paused for a little while. Try again later.";
@@ -65,7 +65,7 @@ const errText = (e: any) => {
   if (m === "BUSY_TRY_AGAIN_SHORTLY") return "The market maker is busy with other trades. Try again in a minute.";
   if (m.startsWith("NOT_ENOUGH_")) return "The market maker can't fill that size right now. Try a smaller amount.";
   if (m.startsWith("CSD_MAX_TARGET") || m.startsWith("VALID_BEFORE") || m === "FEE_TOO_LOW") return "The market maker's terms just changed. Reload the page and try again.";
-  if (m.startsWith("LOCK_REJECTED")) return "Ethereum rejected the USDC lock, so nothing was traded. Check your USDC balance and try again.";
+  if (m.startsWith("LOCK_REJECTED")) return "The USDC lock didn't go through, so nothing was traded. Try again in a minute or two.";
   return m;
 };
 
@@ -222,7 +222,7 @@ function routes(mk: Market, side: Side, csd: bigint): Route[] {
 }
 // Ordinary "not right now" answers skip a maker briefly; silence or anything odd, for longer.
 // (Answers are the maker's own words, so none of them stops the page from trying another maker.)
-const BRIEF = /^(PRICE_MOVED|TRADE_SIZE|NOT_ENOUGH_|BUSY|SELLS_PAUSED|MARKET_MAKER_PAUSED|COINS_|FINISH_YOUR_|TOO_MANY_UNPAID|ADDRESS_FROM|SLOW_DOWN|REQUEST_EXPIRED|NAME_YOUR_COINS|CSD_)/;
+const BRIEF = /^(PRICE_MOVED|TRADE_SIZE|NOT_ENOUGH_|BUSY|SELLS_PAUSED|MARKET_MAKER_PAUSED|COINS_|FINISH_YOUR_|TOO_MANY_UNPAID|ADDRESS_FROM|SLOW_DOWN|REQUEST_EXPIRED|NAME_YOUR_COINS|CSD_|LOCK_REJECTED|VALID_|CONFIRMATIONS_|FEE_TOO_LOW|WRONG_)/;
 const skipFor = (err: string) => BRIEF.test(err) ? 2 * 60_000 : 30 * 60_000;
 
 // The market maker's signed answer to one of our objects
@@ -341,6 +341,8 @@ export default function CsdMarketPage() {
       const maxT = offers.reduce<bigint | null>((a, o) => { const v = BigInt(o.payload.maxTradeUsdc); return a === null || v > a ? v : a; }, null);
       const best = side === "buy" ? m.bestAsk : m.bestBid;
       if (!offers.length) return side === "buy" ? "Nobody is selling CSD right now." : "Nobody is buying CSD right now.";
+      if (offers.every(o => (avoid.get(String(o.payload.marketMaker).toLowerCase()) ?? 0) > Date.now()))
+        return "The market maker couldn't take your last trade. Try again in a minute or two.";
       if (minT !== null && raw.every(v => v !== null && v < minT)) {
         // (a sale's fee comes out of what you receive, so it takes a little more CSD)
         const need = side === "sell" ? minT + BigInt(offers[0]!.payload.feeUsdc) : minT;

@@ -96,14 +96,16 @@ const aon = aonApi("", ((u: any, i: any) => aonFetch(String(u), i)) as typeof fe
 type Market = CsdMarket & { sellOffer: any; buyOffer: any };
 // The market from the market makers' signed offers on AON; recent trades from the market maker's API if it's reachable
 async function loadMarket(): Promise<Market> {
-  const off = await aon.offers(CSD_MARKET_MAKERS);
+  // The market maker names its current offers; they're fetched from AON and checked here
+  let info: CsdMarket | null = null;
+  try { info = await mmGet<CsdMarket>("/market"); } catch {}
+  const off = await aon.offers(CSD_MARKET_MAKERS, [info?.offers?.sell, info?.offers?.buy].filter(Boolean) as string[]);
   const ours = (o: any) => o && String(o.payload.settlementContract).toLowerCase() === CSD_SETTLEMENT.toLowerCase()
     && String(o.payload.usdc).toLowerCase() === CSD_USDC.toLowerCase() && String(o.payload.csdGenesisHash).toLowerCase() === CSD_GENESIS.toLowerCase();
   if (!ours(off.sell) || !ours(off.buy)) throw new Error("NO_OFFER");
   const P = off.sell.payload, p: Pool = { usdc: BigInt(P.poolUsdc), csd: BigInt(P.poolCsd), spreadBps: BigInt(P.spreadBps) };
   const l = ladder(p, 5_000_000n, 8);
-  let recent: CsdMarket["recent"] = [];
-  try { recent = (await mmGet<CsdMarket>("/market")).recent ?? []; } catch {}
+  const recent: CsdMarket["recent"] = info?.recent ?? [];
   return { marketMaker: P.marketMaker, settlement: P.settlementContract, usdc: P.usdc, chainId: CHAIN_ID, csdGenesis: P.csdGenesisHash,
     pool: { usdc: P.poolUsdc, csd: P.poolCsd }, mid: String(midPrice(p)), spreadBps: P.spreadBps, feeUsdc: P.feeUsdc,
     bestAsk: String(quoteBuy(p, 100_000_000n)), bestBid: String(quoteSell(p, 100_000_000n)),
@@ -178,7 +180,7 @@ export default function CsdMarketPage() {
         if (!t.aonAuth) continue;
         try {
           // The market maker's receipt references the trade's authorization
-          const rc = (await aon.inbound(t.aonAuth)).find(o => o.objectType === "receipt" && String(o.payload?.authHash).toLowerCase() === t.authHash.toLowerCase());
+          const rc = await aon.receipt(t.aonAuth, t.authHash, CSD_MARKET_MAKERS);
           if (!rc) continue;
           if (t.side === "sell" && t.status === "pending") { saveTrade({ ...t, releaseTx: rc.payload.executionTx, status: "done", receipt: rc.objectHash }); readUsdc(); }
           else saveTrade({ ...t, receipt: rc.objectHash });

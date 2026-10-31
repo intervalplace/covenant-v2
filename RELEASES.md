@@ -12,6 +12,7 @@ to check one.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
+| v1.1.4 | `bafybeibvldv7fohqbyxcxxredp52eclchjb2nvkcdj3us4fbqjigco4a6e` | `1811720c8e92` | 2026-10-31 | CSD/USDC: a buy's CSD shows in your balance within seconds, as unconfirmed (the market maker's published payment, checked against an independent CSD node); a sale's USDC shows as arriving; a seller's own claim includes enough blocks for the contract. |
 | v1.1.3 | `bafybeidscppbevpjri4cmjncsdc2ubu3ujmiwde3buucefvqxu7fmubjzu` | `a7bf8191ac73` | 2026-10-31 | CSD/USDC: a sale shows as sold as soon as Ethereum has it final (the page checks a few times); plainer wording if a market maker doesn't release. |
 | v1.1.2 | `bafybeibnmsjuxxb2xfxbjj2vw3qlb72tvonakfzgujgfirudvbjtp3u3hy` | `9112021a4175` | 2026-10-31 | CSD/USDC: a price chart from the market makers' signed offers, the average price and the price after your trade, step-by-step progress, and declined trades shown as "Not traded". |
 | v1.1.1 | `bafybeif7d3cgt3jkjorfamfff6wdyypgolk3vh7whhlz7xi2udbgzisble` | `de3b7c5fa7a0` | 2026-10-31 | CSD/USDC: says when a trade is below the smallest or above the largest size; a rejected lock only skips the market maker for two minutes. |

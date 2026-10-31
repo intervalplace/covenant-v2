@@ -616,7 +616,7 @@ export default function CsdMarketPage() {
       if (!proof?.ok) throw new Error("Your CSD payment isn't in a block yet. Try again in a few minutes.");
       const need = BigInt(conf) * work(BigInt(a.csdMaxTarget)); let have = work(bitsToTarget(Number(proof.header.bits)));
       const chain: any[] = []; const n = csdNode(base);
-      for (let h = Number(proof.height) + 1; have < need && chain.length < 120; h++) {
+      for (let h = Number(proof.height) + 1; (have < need || chain.length + 1 < conf) && chain.length < 120; h++) {
         const hd = await n.headerAt(h); if (!hd?.bits) throw new Error(`Not enough CSD blocks yet: the proof needs about ${conf} after your payment. Try again later.`);
         chain.push(hd); have += work(bitsToTarget(Number(hd.bits)));
       }

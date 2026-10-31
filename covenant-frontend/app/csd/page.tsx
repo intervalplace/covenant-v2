@@ -101,7 +101,7 @@ const aon = aonApi("", ((u: any, i: any) => aonFetch(String(u), i)) as typeof fe
 // into one book and sends each trade to the best price. No maker is trusted: the contract and the
 // checks below protect the trade whoever is on the other side.
 type Maker = { addr: string; sell?: any; buy?: any };
-type Market = { history: { at: number; price: bigint; maker: string }[]; makers: Maker[]; asks: { price: bigint; csd: bigint }[]; bids: { price: bigint; csd: bigint }[];
+type Market = { makers: Maker[]; asks: { price: bigint; csd: bigint }[]; bids: { price: bigint; csd: bigint }[];
   bestAsk: bigint | null; bestBid: bigint | null; recent: CsdMarket["recent"] };
 type Route = { maker: string; offer: any; usdc: bigint; fee: bigint; total: bigint };
 const poolOf = (o: any): Pool => ({ usdc: BigInt(o.payload.poolUsdc), csd: BigInt(o.payload.poolCsd), spreadBps: BigInt(o.payload.spreadBps) });
@@ -218,7 +218,18 @@ async function loadMarket(read?: Reader, chain?: Chain): Promise<Market> {
   const known = new Set(CSD_MARKET_MAKERS.map(x => x.toLowerCase()));
   const real: any[] = [];
   try {
-    for (const o of await aon.receipts(makers.map(x => x.addr), 40)) {
+    // (up to 200, enough for the chart's week; each is checked once and remembered)
+    const mm = new Set(makers.map(x => x.addr.toLowerCase())), rs: any[] = [];
+    for (let page = 0; page < 2; page++) {
+      const os = await aon.list("receipt", 100, page * 100).catch(() => []);
+      for (const o of os) {
+        if (Date.now() - Number(o.createdAt) > 8 * 86400_000) continue;
+        const signer = (await objectSigner(o))?.toLowerCase();
+        if (signer && mm.has(signer)) rs.push({ ...o, signer });
+      }
+      if (os.length < 100 || os.some(o => Date.now() - Number(o.createdAt) > 8 * 86400_000)) break;
+    }
+    for (const o of rs) {
       if (String(o.payload?.settlementContract).toLowerCase() !== CSD_SETTLEMENT.toLowerCase() || !(BigInt(o.payload?.csdAmount ?? 0) > 0n)) continue;
       const k = read ? await realReceipt(o, read) : null;
       if (k) real.push({ ...o, how: k });
@@ -251,8 +262,23 @@ async function loadMarket(read?: Reader, chain?: Chain): Promise<Market> {
   if (chain) try {
     const makerSet = new Set(makers.map(x => x.addr.toLowerCase()));
     const byAuth = new Map<string, any>(), paidAt = new Map<string, { signer: string; at: number }>();
-    for (const o of await aon.list("payment", 40)) {
-      if (o.payload?.paymentType !== "csd_usdc_buy_payment" || Date.now() - Number(o.createdAt) > 6 * 3600_000) continue;
+    const settledAuth = new Set(real.map(o => String(o.payload.authHash).toLowerCase()));
+    const pays: any[] = [];
+    for (let page = 0; page < 2; page++) {
+      const os = await aon.list("payment", 100, page * 100).catch(() => []);
+      pays.push(...os);
+      if (os.length < 100 || os.some(o => Date.now() - Number(o.createdAt) > 7 * 86400_000)) break;
+    }
+    for (const o of pays) {
+      if (o.payload?.paymentType !== "csd_usdc_buy_payment" || Date.now() - Number(o.createdAt) > 7 * 86400_000) continue;
+      const h = String(o.payload?.authHash).toLowerCase();
+      // settled (its receipt is checked): only who paid and when; not settled yet: the full checks
+      if (settledAuth.has(h)) {
+        const signer = (await objectSigner(o))?.toLowerCase();
+        if (signer && makerSet.has(signer) && (!paidAt.has(h) || paidAt.get(h)!.at > Math.floor(Number(o.createdAt) / 1000))) paidAt.set(h, { signer, at: Math.floor(Number(o.createdAt) / 1000) });
+        continue;
+      }
+      if (Date.now() - Number(o.createdAt) > 6 * 3600_000) continue;
       const { trade: t, paid } = await buyTrade(o, makerSet, chain);
       if (paid && (!paidAt.has(paid.authHash) || paidAt.get(paid.authHash)!.at > paid.at)) paidAt.set(paid.authHash, paid);
       if (t && (!byAuth.has(t.authHash) || byAuth.get(t.authHash).at > t.at)) byAuth.set(t.authHash, t);
@@ -270,24 +296,7 @@ async function loadMarket(read?: Reader, chain?: Chain): Promise<Market> {
     recent = [...recent].sort((a, b) => b.at - a.at);
   } catch {}
   if (!recent.length) recent = info?.recent ?? [];
-  // Price history: every maker publishes a signed offer whenever its pool moves, with its mid price.
-  // (From the makers trades go to, signature checked; one line, the newest few hundred.)
-  const used = new Set(makers.filter(x => x.sell || x.buy).map(x => x.addr));
-  const history: { at: number; price: bigint; maker: string }[] = [];
-  try {
-    for (let page = 0; page < 3; page++) {
-      const os = await aon.list("offer", 100, page * 100);
-      for (const o of os) {
-        if (o.payload?.offerType !== "csd_usdc_sell_csd" || !used.has(String(o.payload?.marketMaker).toLowerCase()) || !ours(o) || !(Number(o.createdAt) <= Date.now() + 120_000)) continue;
-        if (!/^\d+$/.test(String(o.payload?.midUsdcPerCsd))) continue;
-        if (!history.some(h => h.at === Number(o.createdAt)) && (await objectSigner(o))?.toLowerCase() === String(o.payload.marketMaker).toLowerCase())
-          history.push({ at: Number(o.createdAt), price: BigInt(o.payload.midUsdcPerCsd), maker: String(o.payload.marketMaker).toLowerCase() });
-      }
-      if (os.length < 100) break;
-    }
-  } catch {}
-  history.sort((a, b) => a.at - b.at);
-  return { history, makers, asks, bids, bestAsk, bestBid, recent };
+  return { makers, asks, bids, bestAsk, bestBid, recent };
 }
 // The best maker for a trade of `csd` (buy: least USDC to pay; sell: most USDC received), within each maker's limits
 function routes(mk: Market, side: Side, csd: bigint): Route[] {
@@ -318,31 +327,42 @@ async function answer(objectHash: string, marketMaker: string, timeoutMs = 45_00
 
 // The price over time, from the makers' signed offers on AON (a step line: the price holds until the next trade)
 // (one line per market maker)
-function PriceChart({ points }: { points: { at: number; price: bigint; maker: string }[] }) {
-  const W = 1000, H = 160, P = 8;
-  const xs = points.map(p => p.at), ys = points.map(p => Number(p.price) / 1e6);
-  const now = Date.now(), x0 = Math.min(...xs), x1 = Math.max(now, ...xs);
+// The price of real trades: makers' receipts checked against Ethereum, and buys from the moment
+// they happened (see buyTrade). Over the last day or week, as a step line from trade to trade.
+function PriceChart({ trades }: { trades: CsdMarket["recent"] }) {
+  const [range, setRange] = useState<"24h" | "7d">(() => { try { return (localStorage.getItem("covenant.csd.chart") as any) === "7d" ? "7d" : "24h"; } catch { return "24h"; } });
+  const pick = (r: "24h" | "7d") => { setRange(r); try { localStorage.setItem("covenant.csd.chart", r); } catch {} };
+  const W = 1000, H = 160, P = 8, now = Date.now(), x0 = now - (range === "24h" ? 86400_000 : 7 * 86400_000), x1 = now;
+  const all = [...trades].map(t => ({ at: t.at * 1000, price: Number(t.price) / 1e6, side: t.side })).sort((a, b) => a.at - b.at);
+  const inRange = all.filter(t => t.at >= x0);
+  const before = [...all].reverse().find(t => t.at < x0); // (the line starts at the price going into the range)
+  const pts = before ? [{ ...before, at: x0 }, ...inRange] : inRange;
+  const ys = pts.map(p => p.price);
   let y0 = Math.min(...ys), y1 = Math.max(...ys); if (y1 - y0 < y1 * 0.02) { y0 -= y1 * 0.01; y1 += y1 * 0.01; }
-  const X = (t: number) => P + ((t - x0) / Math.max(1, x1 - x0)) * (W - 2 * P), Y = (v: number) => H - P - ((v - y0) / (y1 - y0)) * (H - 2 * P);
-  const makers = [...new Set(points.map(p => p.maker))];
-  const paths = makers.map(mk => {
-    const ps = points.filter(p => p.maker === mk);
-    let d = `M${X(ps[0].at)},${Y(Number(ps[0].price) / 1e6)}`;
-    for (let i = 1; i < ps.length; i++) d += ` H${X(ps[i].at)} V${Y(Number(ps[i].price) / 1e6)}`;
-    return { d: d + ` H${X(x1)}`, up: ps[ps.length - 1].price >= ps[0].price };
-  });
-  const first = Number(points[0].price) / 1e6, last = Number(points[points.length - 1].price) / 1e6;
-  const when = (t: number) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const X = (t: number) => P + ((t - x0) / (x1 - x0)) * (W - 2 * P), Y = (v: number) => H - P - ((v - y0) / Math.max(1e-12, y1 - y0)) * (H - 2 * P);
+  let d = pts.length ? `M${X(pts[0].at)},${Y(pts[0].price)}` : "";
+  for (let i = 1; i < pts.length; i++) d += ` H${X(pts[i].at)} V${Y(pts[i].price)}`;
+  if (pts.length) d += ` H${X(x1)}`;
+  const up = pts.length > 1 && pts[pts.length - 1].price >= pts[0].price;
+  const when = (t: number) => new Date(t).toLocaleString(undefined, range === "24h" ? { hour: "2-digit", minute: "2-digit" } : { month: "short", day: "numeric" });
+  const tab = (r: "24h" | "7d", label: string) => <button type="button" className={"link-btn" + (range === r ? " on" : "")} style={{ fontWeight: range === r ? 600 : 400, opacity: range === r ? 1 : 0.6 }} onClick={() => pick(r)}>{label}</button>;
   return (
     <section className="card" aria-label="Price chart" style={{ padding: "14px 18px", marginBottom: 16 }}>
       <div className="row-between" style={{ marginBottom: 6 }}>
-        <span className="stat-label">Price (USDC per CSD)</span>
-        <span className="faint">{y1.toFixed(4)} high · {y0.toFixed(4)} low</span>
+        <span className="stat-label">Trade price (USDC per CSD)</span>
+        <span style={{ display: "flex", gap: 14, alignItems: "center" }}>
+          {pts.length > 0 && <span className="faint">{y1.toFixed(4)} high · {y0.toFixed(4)} low · {inRange.length} trade{inRange.length === 1 ? "" : "s"}</span>}
+          {tab("24h", "24h")}{tab("7d", "7d")}
+        </span>
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: 140, display: "block" }} role="img"
-        aria-label={`Price from ${first.toFixed(4)} to ${last.toFixed(4)} USDC`}>
-        {paths.map((p, i) => <path key={i} d={p.d} fill="none" stroke={p.up ? "var(--buy, #2f7d5b)" : "var(--sell, #b4473c)"} strokeWidth="2.5" strokeOpacity={makers.length > 1 ? 0.75 : 1} vectorEffect="non-scaling-stroke" />)}
-      </svg>
+      {pts.length === 0 ? <div className="book-empty" style={{ height: 140, display: "grid", placeItems: "center" }}>No trades in the last {range === "24h" ? "24 hours" : "7 days"}.</div> : (
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: 140, display: "block" }} role="img"
+          aria-label={`Trade price over the last ${range === "24h" ? "24 hours" : "7 days"}, from ${pts[0].price.toFixed(4)} to ${pts[pts.length - 1].price.toFixed(4)} USDC`}>
+          <path d={d} fill="none" stroke={up ? "var(--buy, #2f7d5b)" : "var(--sell, #b4473c)"} strokeWidth="2.5" vectorEffect="non-scaling-stroke" />
+          {/* (a dot per trade: a zero-length round stroke, which stays round however the chart stretches) */}
+          {inRange.map((t, i) => <path key={i} d={`M${X(t.at)},${Y(t.price)} h0`} stroke={t.side === "buy" ? "var(--buy, #2f7d5b)" : "var(--sell, #b4473c)"} strokeWidth="8" strokeLinecap="round" vectorEffect="non-scaling-stroke" />)}
+        </svg>
+      )}
       <div className="row-between faint" style={{ marginTop: 4 }}><span>{when(x0)}</span><span>now</span></div>
     </section>
   );
@@ -809,7 +829,7 @@ export default function CsdMarketPage() {
         </div>
       </div>
 
-      {m && m.history.length > 1 && <PriceChart points={m.history} />}
+      {m && <PriceChart trades={m.recent} />}
 
       <div className="exchange-grid">
         <section className="card" aria-label="Order book" style={{ padding: "18px 14px" }}>

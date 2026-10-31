@@ -18,6 +18,9 @@ const store = {
   del(k: string) { try { localStorage.removeItem(k); } catch {} },
 };
 const SCAN_GAP = 3; // addresses checked past the last one known to be used
+// The first look on a device goes further: each buy takes a fresh address, including buys that
+// didn't happen, so a wallet can have runs of unused addresses before ones holding CSD
+const FIRST_SCAN_GAP = 25;
 
 export function useCsdWallet(account?: Address) {
   const { signMessageAsync } = useSignMessage();
@@ -28,6 +31,7 @@ export function useCsdWallet(account?: Address) {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
   const sessionSecret = useRef<Record<string, Hex>>({});
+  const scannedDeep = useRef("");
 
   useEffect(() => {
     setCoins([]); setLoaded(false); setError("");
@@ -59,12 +63,14 @@ export function useCsdWallet(account?: Address) {
     if (!wallet) return;
     try {
       const all: CsdUtxo[] = []; let next = nextIndex;
-      for (let i = 0; i < next + SCAN_GAP && i < 200; i++) {
+      const gap = scannedDeep.current === k ? SCAN_GAP : FIRST_SCAN_GAP;
+      for (let i = 0; i < next + gap && i < 200; i++) {
         const c = await node.utxos(wallet.key(i));
         if (c.length && i >= next) next = i + 1;
         all.push(...c);
       }
       if (next !== nextIndex) { setNextIndex(next); store.set(`${k}.next`, String(next)); }
+      scannedDeep.current = k;
       setCoins(all); setLoaded(true); setError("");
     } catch (e: any) { setError(e.message ?? String(e)); }
   }, [wallet, node, nextIndex, k]);

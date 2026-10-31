@@ -12,6 +12,7 @@ to check one.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
+| v1.1.3 | `bafybeidscppbevpjri4cmjncsdc2ubu3ujmiwde3buucefvqxu7fmubjzu` | `a7bf8191ac73` | 2026-10-31 | CSD/USDC: a sale shows as sold as soon as Ethereum has it final (the page checks a few times); plainer wording if a market maker doesn't release. |
 | v1.1.2 | `bafybeibnmsjuxxb2xfxbjj2vw3qlb72tvonakfzgujgfirudvbjtp3u3hy` | `9112021a4175` | 2026-10-31 | CSD/USDC: a price chart from the market makers' signed offers, the average price and the price after your trade, step-by-step progress, and declined trades shown as "Not traded". |
 | v1.1.1 | `bafybeif7d3cgt3jkjorfamfff6wdyypgolk3vh7whhlz7xi2udbgzisble` | `de3b7c5fa7a0` | 2026-10-31 | CSD/USDC: says when a trade is below the smallest or above the largest size; a rejected lock only skips the market maker for two minutes. |
 | v1.1.0 | `bafybeiafwya5ikenzl5hypkvqxw5p5c67q5q7wq7w262blgqtsw6mc2z7a` | `fc4202eb849d` | 2026-10-30 | CSD/USDC: trade Compute Substrate (its own chain, no smart contracts) for USDC on Ethereum, wallet to wallet, through an open market of makers on AON. The ETH pair now trades against USDC. |

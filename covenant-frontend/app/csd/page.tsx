@@ -583,12 +583,16 @@ export default function CsdMarketPage() {
       // Done only when Ethereum says so (the maker's word isn't enough)
       let done = false;
       if (r.releaseTx) { setBusy("Releasing your USDC on Ethereum…"); await publicClient.waitForTransactionReceipt({ hash: r.releaseTx }).catch(() => {}); }
-      done = await publicClient.readContract({ address: CSD_SETTLEMENT, abi: csdSettlementAbi, functionName: "finalizedAuthorization", args: [authHash] }).catch(() => false) as boolean;
+      // (a few tries: the node answering may be a block behind the one that confirmed the release)
+      for (let i = 0; i < (r.releaseTx ? 10 : 1) && !done; i++) {
+        done = await publicClient.readContract({ address: CSD_SETTLEMENT, abi: csdSettlementAbi, functionName: "finalizedAuthorization", args: [authHash] }).catch(() => false) as boolean;
+        if (!done && r.releaseTx) await sleep(3000);
+      }
       if (done) {
         saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, releaseTx: r.releaseTx, status: "done", authorization: a, signature: o.signature, csdTx: txToNodeJson(p.tx), aonAuth: o.aon?.auth, maker });
         setBanner({ kind: "ok", text: `Sold ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(auth.usdcAmount)} USDC.`, links: r.releaseTx ? [{ href: etherscanTx(r.releaseTx), label: "Transaction" }] : [] });
       } else {
-        setBanner({ kind: "info", text: `Your ${fmtCsd(csdAmt)} CSD is paid. ${fmtUsdc(auth.usdcAmount)} USDC arrives when the market maker releases it, usually within minutes. If it doesn't, Claim appears in Your trades, and a watchtower can claim it for you.` });
+        setBanner({ kind: "info", text: `Your ${fmtCsd(csdAmt)} CSD is paid. ${fmtUsdc(auth.usdcAmount)} USDC arrives when the market maker releases it, usually within minutes. If it doesn't, a Claim button appears in Your trades, and other market makers can claim it for you too.` });
       }
       watchUsdc(); setTimeout(csd.refresh, 3000);
     } catch (e) { setBanner({ kind: "danger", text: errText(e) }); }

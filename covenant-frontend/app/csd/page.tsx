@@ -16,7 +16,7 @@ import {
   CSD_ENABLED, CSD_SALE_EXECUTOR_FEE, CSD_MM_URL, CSD_SETTLEMENT, CSD_USDC, CSD_GENESIS, CSD_BUY_CONFIRMATIONS, CSD_EXPLORER, CSD_NODE_URL, CSD_TARGET_REF, CSD_MARKET_MAKERS, csdSettleAbi, csdRefundAbi,
   CSD_AUTH_TYPES, PERMIT_TYPES, csdDomain, csdSettlementAbi, usdcPermitAbi, mmGet, type CsdMarket,
 } from "@/csd/config";
-import { addr20ToBytes32, csdAddressProof, incomingPaymentLooksReal, txToNodeJson, txFromNodeJson, bitsToTarget, csdNode, csdSaleRequestDigest, csdSignDigest, type Hex as CHex, type CsdUtxo } from "@/csd/csd-wallet";
+import { addr20ToBytes32, csdAddressProof, csdTxid, incomingPaymentLooksReal, txToNodeJson, txFromNodeJson, bitsToTarget, csdNode, csdSaleRequestDigest, csdSignDigest, type Hex as CHex, type CsdUtxo } from "@/csd/csd-wallet";
 import { quoteBuy, quoteSell, midPrice, ladder, afterBuy, afterSell, type Pool } from "@/csd/pool";
 import { aonApi, buyAuthorizationObject, saleRequestObject, salePaymentObject, objectSigner } from "@/csd/aon-client";
 import { aonFetch } from "@/endpoints";
@@ -159,9 +159,53 @@ function rememberProven(addrs: string[]) {
   try { localStorage.setItem(PROVEN_KEY, JSON.stringify(Object.fromEntries(Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 200)))); } catch {}
 }
 function forgetProven(addr: string) { const m = provenMap(); delete m[addr.toLowerCase()]; try { localStorage.setItem(PROVEN_KEY, JSON.stringify(m)); } catch {} }
+// A buy is a trade from the moment the buyer's USDC is locked on Ethereum and the maker's CSD has
+// reached them in a CSD block; only the maker's own payout waits for the 20 blocks it proves. So
+// Recent trades shows buys from then, at the time they happened, from the maker's signed payment
+// (published on AON as it pays) checked against the buyer's signed order, Ethereum and CSD.
+// (Checked once; one not in a block yet is looked at again later.)
+type Chain = { read?: Reader; settled: (authHash: Hex) => Promise<boolean> };
+const buyChecked = new Map<string, { at: number; trade: CsdMarket["recent"][number] & { authHash: string } | null; paid?: { authHash: string; signer: string; at: number } }>();
+const toAuth = (a: any) => ({ ...a, csdAmount: BigInt(a.csdAmount), usdcAmount: BigInt(a.usdcAmount), minConfirmations: BigInt(a.minConfirmations), csdMaxTarget: BigInt(a.csdMaxTarget),
+  executorFeeAmount: BigInt(a.executorFeeAmount), validAfter: BigInt(a.validAfter), validBefore: BigInt(a.validBefore) });
+async function buyTrade(o: any, makers: Set<string>, chain: Chain) {
+  const c = buyChecked.get(o.objectHash);
+  if (c && (c.trade || Date.now() - c.at < 30_000)) return c;
+  let trade: any = null, final = true, paid: { authHash: string; signer: string; at: number } | undefined; // (final: a "no" that won't change)
+  try {
+    const signer = (await objectSigner(o))?.toLowerCase();
+    if (!signer || !makers.has(signer)) throw 0;
+    const authHash = String(o.payload.authHash).toLowerCase();
+    // (when the maker says it paid: the time a settled buy is shown at, once its receipt is checked)
+    paid = { authHash, signer, at: Math.floor(Number(o.createdAt) / 1000) };
+    // the buyer's own signed order, as published on AON: the maker is paid, it pays their address
+    let auth: any = null;
+    for (const r of (o.references ?? []).slice(0, 3)) {
+      const x = await aon.get(r).catch(() => null);
+      if (x?.objectType !== "authorization" || !x.payload?.authorization) continue;
+      const a = toAuth(x.payload.authorization);
+      if (hashTypedData({ domain: csdDomain(), types: CSD_AUTH_TYPES, primaryType: "CsdUsdcAuthorization", message: a }).toLowerCase() === authHash) { auth = a; break; }
+    }
+    if (!auth || String(auth.sellerUsdcRecipient).toLowerCase() !== signer || String(auth.usdc).toLowerCase() !== CSD_USDC.toLowerCase()) throw 0;
+    const tx = txFromNodeJson(o.payload.csdTx), txid = csdTxid(tx).toLowerCase(), to = String(auth.sellerCsdScriptHash).slice(0, 42).toLowerCase();
+    if (txid !== String(o.payload.csdTxid).toLowerCase()) throw 0;
+    const vouts = tx.outputs.map((x, v) => [x, v] as const).filter(([x]) => x.addr20.toLowerCase() === to);
+    if (vouts.reduce((s, [x]) => s + x.value, 0n) < auth.csdAmount) throw 0;
+    final = false;
+    // the USDC locked (or already paid out) on Ethereum, and the CSD in a block at the buyer's address
+    if (!(await chain.settled(authHash as Hex))) throw 0;
+    const coins = await (independentNode ?? csdNode(`${CSD_MM_URL}/api/csd`)).utxosAt(to as CHex, true);
+    if (!vouts.some(([, v]) => coins.some(u => u.txid === txid && u.vout === v))) throw 0;
+    trade = { authHash, side: "buy", csdAmount: String(auth.csdAmount), usdcAmount: String(auth.usdcAmount),
+      price: String(auth.usdcAmount * 100_000_000n / auth.csdAmount), at: Math.floor(Number(o.createdAt) / 1000) };
+  } catch {}
+  const r = { at: final ? Infinity : Date.now(), trade, paid };
+  buyChecked.set(o.objectHash, r);
+  return r;
+}
 const OFFERS_KEY = "covenant.csd.offers";
 const remembered = (): string[] => { try { return JSON.parse(localStorage.getItem(OFFERS_KEY) ?? "[]"); } catch { return []; } };
-async function loadMarket(read?: Reader): Promise<Market> {
+async function loadMarket(read?: Reader, chain?: Chain): Promise<Market> {
   // Offer hashes to start from: the ones seen last time, and the known market makers' own
   let info: CsdMarket | null = null;
   try { info = await mmGet<CsdMarket>("/market"); } catch {}
@@ -202,6 +246,28 @@ async function loadMarket(read?: Reader): Promise<Market> {
     recent = real
       .map(o => ({ side: String(o.payload.buyer).toLowerCase() === o.signer ? "sell" : "buy", csdAmount: String(o.payload.csdAmount), usdcAmount: String(o.payload.usdcAmount),
         price: String(BigInt(o.payload.usdcAmount) * 100_000_000n / BigInt(o.payload.csdAmount)), at: Math.floor(Number(o.createdAt) / 1000) })) as any;
+  } catch {}
+  // Buys from the moment they happened (see buyTrade), each replacing its receipt once that's out
+  if (chain) try {
+    const makerSet = new Set(makers.map(x => x.addr.toLowerCase()));
+    const byAuth = new Map<string, any>(), paidAt = new Map<string, { signer: string; at: number }>();
+    for (const o of await aon.list("payment", 40)) {
+      if (o.payload?.paymentType !== "csd_usdc_buy_payment" || Date.now() - Number(o.createdAt) > 6 * 3600_000) continue;
+      const { trade: t, paid } = await buyTrade(o, makerSet, chain);
+      if (paid && (!paidAt.has(paid.authHash) || paidAt.get(paid.authHash)!.at > paid.at)) paidAt.set(paid.authHash, paid);
+      if (t && (!byAuth.has(t.authHash) || byAuth.get(t.authHash).at > t.at)) byAuth.set(t.authHash, t);
+    }
+    // A settled buy (its receipt checked on Ethereum) is shown when its maker paid, not when it was settled
+    real.forEach((o, i) => {
+      const h = String(o.payload.authHash).toLowerCase(), p = paidAt.get(h);
+      if (recent[i]?.side === "buy" && p && p.signer === o.signer && p.at < recent[i].at) recent[i] = { ...recent[i], at: p.at };
+    });
+    if (byAuth.size) {
+      const receiptAuth = real.map(o => String(o.payload.authHash).toLowerCase());
+      recent = recent.filter((_, i) => !byAuth.has(receiptAuth[i]));
+      recent = [...recent, ...[...byAuth.values()].map(({ authHash, ...t }) => t)];
+    }
+    recent = [...recent].sort((a, b) => b.at - a.at);
   } catch {}
   if (!recent.length) recent = info?.recent ?? [];
   // Price history: every maker publishes a signed offer whenever its pool moves, with its mid price.
@@ -291,6 +357,10 @@ export default function CsdMarketPage() {
   const csd = useCsdWallet(address);
   const reader = useMemo<Reader | undefined>(() => publicClient
     ? (h) => publicClient.getTransactionReceipt({ hash: h }).then(r => r as any, () => null) : undefined, [publicClient]);
+  const chain = useMemo<Chain | undefined>(() => publicClient ? { read: reader, settled: async (h: Hex) => {
+    const v = (fn: "usdcLocked" | "finalizedAuthorization") => publicClient.readContract({ address: CSD_SETTLEMENT, abi: csdSettlementAbi, functionName: fn, args: [h] }) as Promise<boolean>;
+    return (await v("usdcLocked")) || (await v("finalizedAuthorization"));
+  } } : undefined, [publicClient, reader]);
   const [m, setM] = useState<Market | null>(null);
   const [mErr, setMErr] = useState("");
   const [side, setSide] = useState<Side>("buy");
@@ -308,10 +378,10 @@ export default function CsdMarketPage() {
   useEffect(() => {
     if (!CSD_ENABLED) return;
     let live = true;
-    const load = () => loadMarket(reader).then(x => { if (live) { setM(x); setMErr(""); } }).catch(e => live && setMErr(e.message));
+    const load = () => loadMarket(reader, chain).then(x => { if (live) { setM(x); setMErr(""); } }).catch(e => live && setMErr(e.message));
     load(); const id = setInterval(load, 10_000);
     return () => { live = false; clearInterval(id); };
-  }, [reader]);
+  }, [reader, chain]);
 
   // your trades (kept in this browser)
   useEffect(() => { try { setMine(tradesKey ? JSON.parse(localStorage.getItem(tradesKey) ?? "[]") : []); } catch { setMine([]); } }, [tradesKey]);
@@ -460,7 +530,7 @@ export default function CsdMarketPage() {
       let w = csd.wallet;
       if (!w) { setBusy("Confirm in your wallet…"); w = await csd.setup(remember); }
       setBusy("Confirm in your wallet (1/2)…");
-      const fresh = await loadMarket(reader); setM(fresh);
+      const fresh = await loadMarket(reader, chain); setM(fresh);
       const rt = routes(fresh, "buy", csdAmt)[0]; if (!rt) throw new Error("NO_OFFER");
       if (await marketFull(rt.total)) throw new Error("MARKET_FULL");
       const usdcAmount = rt.usdc, feeAmt = rt.fee, maker = rt.maker;
@@ -529,7 +599,7 @@ export default function CsdMarketPage() {
       if (!csd.wallet) { setBusy("Confirm in your wallet…"); await csd.setup(remember); setBusy(null); return; }
       setBusy("Sending your order…");
       const minOut = preview.usdc * 995n / 1000n;
-      const fresh = await loadMarket(reader); setM(fresh);
+      const fresh = await loadMarket(reader, chain); setM(fresh);
       if (await marketFull(preview.usdc + CSD_SALE_EXECUTOR_FEE)) throw new Error("MARKET_FULL");
       const candidates = routes(fresh, "sell", csdAmt).filter(x => x.usdc >= minOut).slice(0, 3);
       if (!candidates.length) throw new Error("PRICE_MOVED");

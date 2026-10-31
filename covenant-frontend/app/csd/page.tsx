@@ -17,8 +17,8 @@ import {
   CSD_AUTH_TYPES, PERMIT_TYPES, csdDomain, csdSettlementAbi, usdcPermitAbi, mmGet, type CsdMarket,
 } from "@/csd/config";
 import { addr20ToBytes32, csdAddressProof, txToNodeJson, txFromNodeJson, bitsToTarget, csdNode, csdSaleRequestDigest, csdSignDigest, type Hex as CHex, type CsdUtxo } from "@/csd/csd-wallet";
-import { quoteBuy, quoteSell, midPrice, ladder, type Pool } from "@/csd/pool";
-import { aonApi, buyAuthorizationObject, saleRequestObject, salePaymentObject } from "@/csd/aon-client";
+import { quoteBuy, quoteSell, midPrice, ladder, afterBuy, afterSell, type Pool } from "@/csd/pool";
+import { aonApi, buyAuthorizationObject, saleRequestObject, salePaymentObject, objectSigner } from "@/csd/aon-client";
 import { aonFetch } from "@/endpoints";
 import { useCsdWallet } from "@/csd/useCsdWallet";
 
@@ -100,7 +100,7 @@ const aon = aonApi("", ((u: any, i: any) => aonFetch(String(u), i)) as typeof fe
 // into one book and sends each trade to the best price. No maker is trusted: the contract and the
 // checks below protect the trade whoever is on the other side.
 type Maker = { addr: string; sell?: any; buy?: any };
-type Market = { makers: Maker[]; asks: { price: bigint; csd: bigint }[]; bids: { price: bigint; csd: bigint }[];
+type Market = { history: { at: number; price: bigint; maker: string }[]; makers: Maker[]; asks: { price: bigint; csd: bigint }[]; bids: { price: bigint; csd: bigint }[];
   bestAsk: bigint | null; bestBid: bigint | null; recent: CsdMarket["recent"] };
 type Route = { maker: string; offer: any; usdc: bigint; fee: bigint; total: bigint };
 const poolOf = (o: any): Pool => ({ usdc: BigInt(o.payload.poolUsdc), csd: BigInt(o.payload.poolCsd), spreadBps: BigInt(o.payload.spreadBps) });
@@ -203,7 +203,24 @@ async function loadMarket(read?: Reader): Promise<Market> {
         price: String(BigInt(o.payload.usdcAmount) * 100_000_000n / BigInt(o.payload.csdAmount)), at: Math.floor(Number(o.createdAt) / 1000) })) as any;
   } catch {}
   if (!recent.length) recent = info?.recent ?? [];
-  return { makers, asks, bids, bestAsk, bestBid, recent };
+  // Price history: every maker publishes a signed offer whenever its pool moves, with its mid price.
+  // (From the makers trades go to, signature checked; one line, the newest few hundred.)
+  const used = new Set(makers.filter(x => x.sell || x.buy).map(x => x.addr));
+  const history: { at: number; price: bigint; maker: string }[] = [];
+  try {
+    for (let page = 0; page < 3; page++) {
+      const os = await aon.list("offer", 100, page * 100);
+      for (const o of os) {
+        if (o.payload?.offerType !== "csd_usdc_sell_csd" || !used.has(String(o.payload?.marketMaker).toLowerCase()) || !ours(o) || !(Number(o.createdAt) <= Date.now() + 120_000)) continue;
+        if (!/^\d+$/.test(String(o.payload?.midUsdcPerCsd))) continue;
+        if (!history.some(h => h.at === Number(o.createdAt)) && (await objectSigner(o))?.toLowerCase() === String(o.payload.marketMaker).toLowerCase())
+          history.push({ at: Number(o.createdAt), price: BigInt(o.payload.midUsdcPerCsd), maker: String(o.payload.marketMaker).toLowerCase() });
+      }
+      if (os.length < 100) break;
+    }
+  } catch {}
+  history.sort((a, b) => a.at - b.at);
+  return { history, makers, asks, bids, bestAsk, bestBid, recent };
 }
 // The best maker for a trade of `csd` (buy: least USDC to pay; sell: most USDC received), within each maker's limits
 function routes(mk: Market, side: Side, csd: bigint): Route[] {
@@ -230,6 +247,38 @@ async function answer(objectHash: string, marketMaker: string, timeoutMs = 45_00
   const r = await aon.response(objectHash, marketMaker, timeoutMs);
   if (!r.accepted) throw new Error(r.error ?? "DECLINED");
   return r;
+}
+
+// The price over time, from the makers' signed offers on AON (a step line: the price holds until the next trade)
+// (one line per market maker)
+function PriceChart({ points }: { points: { at: number; price: bigint; maker: string }[] }) {
+  const W = 1000, H = 160, P = 8;
+  const xs = points.map(p => p.at), ys = points.map(p => Number(p.price) / 1e6);
+  const now = Date.now(), x0 = Math.min(...xs), x1 = Math.max(now, ...xs);
+  let y0 = Math.min(...ys), y1 = Math.max(...ys); if (y1 - y0 < y1 * 0.02) { y0 -= y1 * 0.01; y1 += y1 * 0.01; }
+  const X = (t: number) => P + ((t - x0) / Math.max(1, x1 - x0)) * (W - 2 * P), Y = (v: number) => H - P - ((v - y0) / (y1 - y0)) * (H - 2 * P);
+  const makers = [...new Set(points.map(p => p.maker))];
+  const paths = makers.map(mk => {
+    const ps = points.filter(p => p.maker === mk);
+    let d = `M${X(ps[0].at)},${Y(Number(ps[0].price) / 1e6)}`;
+    for (let i = 1; i < ps.length; i++) d += ` H${X(ps[i].at)} V${Y(Number(ps[i].price) / 1e6)}`;
+    return { d: d + ` H${X(x1)}`, up: ps[ps.length - 1].price >= ps[0].price };
+  });
+  const first = Number(points[0].price) / 1e6, last = Number(points[points.length - 1].price) / 1e6;
+  const when = (t: number) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return (
+    <section className="card" aria-label="Price chart" style={{ padding: "14px 18px", marginBottom: 16 }}>
+      <div className="row-between" style={{ marginBottom: 6 }}>
+        <span className="stat-label">Price (USDC per CSD)</span>
+        <span className="faint">{y1.toFixed(4)} high · {y0.toFixed(4)} low</span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: 140, display: "block" }} role="img"
+        aria-label={`Price from ${first.toFixed(4)} to ${last.toFixed(4)} USDC`}>
+        {paths.map((p, i) => <path key={i} d={p.d} fill="none" stroke={p.up ? "var(--buy, #2f7d5b)" : "var(--sell, #b4473c)"} strokeWidth="2.5" strokeOpacity={makers.length > 1 ? 0.75 : 1} vectorEffect="non-scaling-stroke" />)}
+      </svg>
+      <div className="row-between faint" style={{ marginTop: 4 }}><span>{when(x0)}</span><span>now</span></div>
+    </section>
+  );
 }
 
 export default function CsdMarketPage() {
@@ -326,6 +375,16 @@ export default function CsdMarketPage() {
   const best = useMemo(() => (m && csdAmt > 0n ? routes(m, side, csdAmt)[0] ?? null : null), [m, csdAmt, side]);
   const fee = best?.fee ?? 0n;
   const preview = best ? { usdc: best.usdc, total: best.total } : null;
+  // What the trade does: the average price you get per CSD (fee included), and the maker's price after it
+  const execution = useMemo(() => {
+    if (!best || csdAmt <= 0n) return null;
+    try {
+      const p = poolOf(best.offer);
+      const avg = (best.total * 100_000_000n) / csdAmt;
+      const after = side === "buy" ? midPrice(afterBuy(p, csdAmt, best.usdc)) : midPrice(afterSell(p, csdAmt, best.usdc + best.fee));
+      return { avg, after };
+    } catch { return null; }
+  }, [best, csdAmt, side]);
 
   const problem = (() => {
     if (!m || csdAmt === 0n) return "";
@@ -400,7 +459,7 @@ export default function CsdMarketPage() {
       const deadline = BigInt(t + 300); // short: if this trade doesn't happen now, the permit can't be used later
       const ps = await signTypedDataAsync({ domain: { name, version, chainId: CHAIN_ID, verifyingContract: CSD_USDC }, types: PERMIT_TYPES, primaryType: "Permit",
         message: { owner: address, spender: CSD_SETTLEMENT, value: usdcAmount + feeAmt, nonce, deadline } });
-      setBusy("Buying…");
+      setBusy("Sending your order…");
       // Published on AON, referencing the offer; the market maker answers there
       const obj = buyAuthorizationObject({ offerHash: rt.offer.objectHash, authorization: auth, signature, domain: csdDomain(), types: CSD_AUTH_TYPES,
         addressProof: csdAddressProof(key, authHash as CHex), permit: { deadline, r: ps.slice(0, 66) as Hex, s: ("0x" + ps.slice(66, 130)) as Hex, v: parseInt(ps.slice(130, 132), 16) } });
@@ -420,6 +479,7 @@ export default function CsdMarketPage() {
         throw e;
       }
       saveTrade({ ...trade, lockTx: r.lockTx });
+      setBusy("Locking your USDC on Ethereum…");
       // From a maker this site doesn't know, "Bought" only once the lock is really on Ethereum
       // (its word isn't enough; either way the contract keeps the USDC safe)
       let locked = CSD_MARKET_MAKERS.some(x => x.toLowerCase() === maker.toLowerCase());
@@ -441,7 +501,7 @@ export default function CsdMarketPage() {
     setBanner(null);
     try {
       if (!csd.wallet) { setBusy("Confirm in your wallet…"); await csd.setup(remember); setBusy(null); return; }
-      setBusy("Selling…");
+      setBusy("Sending your order…");
       const minOut = preview.usdc * 995n / 1000n;
       const fresh = await loadMarket(reader); setM(fresh);
       if (await marketFull(preview.usdc + CSD_SALE_EXECUTOR_FEE)) throw new Error("MARKET_FULL");
@@ -483,7 +543,7 @@ export default function CsdMarketPage() {
         && auth.sellerCsdScriptHash?.toLowerCase() === addr20ToBytes32(o.csdAddress).toLowerCase();
       if (!ok) throw new Error("The market maker's offer didn't match what you asked for. Nothing was sent.");
       saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, status: "pending", authorization: a, signature: o.signature, aonAuth: o.aon?.auth, maker });
-      setBusy("Selling…");
+      setBusy("Waiting for the USDC lock on Ethereum…");
       for (let i = 0; ; i++) {
         const [locked, until] = await Promise.all([
           publicClient.readContract({ address: CSD_SETTLEMENT, abi: csdSettlementAbi, functionName: "usdcLocked", args: [authHash] }),
@@ -503,7 +563,7 @@ export default function CsdMarketPage() {
           && rc.logs.some(l => l.address.toLowerCase() === CSD_SETTLEMENT.toLowerCase() && l.topics[1]?.toLowerCase() === authHash.toLowerCase());
         if (!direct) throw new Error("The market maker's lock isn't one anyone could settle for you. Nothing was sent.");
       }
-      setBusy("Selling…");
+      setBusy("Paying your CSD…");
       const p = csd.pay([{ value: csdAmt, addr20: o.csdAddress }], coins);
       // Saved before it's handed over, so the sale can always be claimed with a proof
       saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, status: "pending", authorization: a, signature: o.signature, csdTx: txToNodeJson(p.tx), aonAuth: o.aon?.auth, maker });
@@ -522,7 +582,7 @@ export default function CsdMarketPage() {
       setAmount("");
       // Done only when Ethereum says so (the maker's word isn't enough)
       let done = false;
-      if (r.releaseTx) { setBusy("Selling…"); await publicClient.waitForTransactionReceipt({ hash: r.releaseTx }).catch(() => {}); }
+      if (r.releaseTx) { setBusy("Releasing your USDC on Ethereum…"); await publicClient.waitForTransactionReceipt({ hash: r.releaseTx }).catch(() => {}); }
       done = await publicClient.readContract({ address: CSD_SETTLEMENT, abi: csdSettlementAbi, functionName: "finalizedAuthorization", args: [authHash] }).catch(() => false) as boolean;
       if (done) {
         saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, releaseTx: r.releaseTx, status: "done", authorization: a, signature: o.signature, csdTx: txToNodeJson(p.tx), aonAuth: o.aon?.auth, maker });
@@ -649,6 +709,8 @@ export default function CsdMarketPage() {
         </div>
       </div>
 
+      {m && m.history.length > 1 && <PriceChart points={m.history} />}
+
       <div className="exchange-grid">
         <section className="card" aria-label="Order book" style={{ padding: "18px 14px" }}>
           <div className="row-between" style={{ margin: "0 6px 12px" }}>
@@ -690,6 +752,8 @@ export default function CsdMarketPage() {
               <span className="muted">{side === "buy" ? "You pay" : "You receive"}</span>
               <span>{preview ? `${fmtUsdc(side === "buy" ? preview.total : preview.usdc)} USDC` : "—"}</span>
             </div>
+            {execution && <div className="row-between"><span className="muted">Average price</span><span>{fmtPx(execution.avg)} per CSD</span></div>}
+            {execution && <div className="row-between"><span className="muted">Price after your trade</span><span>{fmtPx(execution.after)}</span></div>}
             {preview && best && <div className="faint">Includes a {fmtUsdc(fee)} USDC fee · market maker <a href={aonLink(best.offer.objectHash)} target="_blank" rel="noreferrer" className="mono">{best.maker.slice(0, 6)}…{best.maker.slice(-4)}</a></div>}
             <div className="row-between">
               <span className="muted">Available</span>
@@ -771,7 +835,7 @@ export default function CsdMarketPage() {
             <table className="tbl"><tbody>
               {mine.slice(0, 15).map(t => (
                 <tr key={t.authHash}>
-                  <td className={t.side}>{t.side === "buy" ? "Bought" : "Sold"}</td>
+                  <td className={t.status === "failed" && !t.releaseTx ? "muted" : t.side}>{t.status === "failed" && !t.releaseTx ? "Not traded" : t.side === "buy" ? "Bought" : "Sold"}</td>
                   <td>{fmtCsd(BigInt(t.csdAmount))} CSD</td>
                   <td>{fmtUsdc(BigInt(t.usdcAmount))} USDC</td>
                   <td className="muted">{t.status === "pending" ? "Pending" : new Date(t.at).toLocaleDateString()}</td>

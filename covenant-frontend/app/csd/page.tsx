@@ -16,7 +16,7 @@ import {
   CSD_ENABLED, CSD_SALE_EXECUTOR_FEE, CSD_MM_URL, CSD_SETTLEMENT, CSD_USDC, CSD_GENESIS, CSD_BUY_CONFIRMATIONS, CSD_EXPLORER, CSD_NODE_URL, CSD_TARGET_REF, CSD_MARKET_MAKERS, csdSettleAbi, csdRefundAbi,
   CSD_AUTH_TYPES, PERMIT_TYPES, csdDomain, csdSettlementAbi, usdcPermitAbi, mmGet, type CsdMarket,
 } from "@/csd/config";
-import { addr20ToBytes32, csdAddressProof, txToNodeJson, txFromNodeJson, bitsToTarget, csdNode, csdSaleRequestDigest, csdSignDigest, type Hex as CHex, type CsdUtxo } from "@/csd/csd-wallet";
+import { addr20ToBytes32, csdAddressProof, incomingPaymentLooksReal, txToNodeJson, txFromNodeJson, bitsToTarget, csdNode, csdSaleRequestDigest, csdSignDigest, type Hex as CHex, type CsdUtxo } from "@/csd/csd-wallet";
 import { quoteBuy, quoteSell, midPrice, ladder, afterBuy, afterSell, type Pool } from "@/csd/pool";
 import { aonApi, buyAuthorizationObject, saleRequestObject, salePaymentObject, objectSigner } from "@/csd/aon-client";
 import { aonFetch } from "@/endpoints";
@@ -25,7 +25,8 @@ import { useCsdWallet } from "@/csd/useCsdWallet";
 type Side = "buy" | "sell";
 type MyTrade = { authHash: Hex; side: Side; csdAmount: string; usdcAmount: string; at: number; lockTx?: Hex; csdTxid?: Hex; releaseTx?: Hex;
   status: "pending" | "done" | "failed"; csdAddress?: Hex; authorization?: any; signature?: Hex; csdTx?: any; lockedUntil?: number; receipt?: string;
-  aonAuth?: string /* the trade's authorization object on AON */; maker?: string };
+  aonAuth?: string /* the trade's authorization object on AON */; maker?: string;
+  unconfirmed?: boolean /* buy: the maker's CSD payment is checked and on its way, not in a block yet */ };
 type Banner = { kind: "info" | "ok" | "danger"; text: string; links?: { href: string; label: string }[] } | null;
 
 const etherscanTx = (tx: string) => (CHAIN_ID === 1 ? `https://etherscan.io/tx/${tx}` : "#");
@@ -364,8 +365,33 @@ export default function CsdMarketPage() {
     return () => clearInterval(id);
   }, [mine, saveTrade, readUsdc, publicClient]);
 
+  // A buy's CSD counts at once: the maker publishes its payment on AON the moment it sends it, and
+  // once the CSD network (the independent node when there is one) holds it, it's in your balance
+  // as unconfirmed. It can be spent after the next CSD block.
+  useEffect(() => {
+    const waiting = mine.filter(t => t.side === "buy" && t.status === "pending" && !t.unconfirmed && t.aonAuth && t.csdAddress && Date.now() - t.at < 3 * 3600_000);
+    if (!waiting.length) return;
+    const node = independentNode ?? csdNode(`${CSD_MM_URL}/api/csd`);
+    let stop = false;
+    const look = async () => {
+      for (const t of waiting) {
+        try {
+          const p = await aon.buyPayment(t.aonAuth!, t.authHash, t.maker ? [t.maker] : CSD_MARKET_MAKERS);
+          if (!stop && p && await incomingPaymentLooksReal(node, p.csdTx, p.csdTxid, t.csdAddress! as CHex, BigInt(t.csdAmount)))
+            saveTrade({ ...t, csdTxid: p.csdTxid as Hex, unconfirmed: true });
+        } catch {}
+      }
+    };
+    look(); const id = setInterval(look, 3000);
+    return () => { stop = true; clearInterval(id); };
+  }, [mine, saveTrade]);
+  // (if it isn't in a block after 30 minutes, it's back to "arriving" rather than counted)
+  const unconfirmedIn = mine.filter(t => t.side === "buy" && t.status === "pending" && t.unconfirmed && Date.now() - t.at < 30 * 60_000);
+  const unconfirmed = unconfirmedIn.reduce((s, t) => s + BigInt(t.csdAmount), 0n);
   // pending buys: CSD is on its way until a coin shows up at the trade's address
-  const incoming = mine.filter(t => t.side === "buy" && t.status === "pending").reduce((s, t) => s + BigInt(t.csdAmount), 0n);
+  const incoming = mine.filter(t => t.side === "buy" && t.status === "pending" && !unconfirmedIn.includes(t)).reduce((s, t) => s + BigInt(t.csdAmount), 0n);
+  // pending sales: paid, the USDC is being released
+  const usdcIncoming = mine.filter(t => t.side === "sell" && t.status === "pending" && t.csdTxid && Date.now() - t.at < 6 * 3600_000).reduce((s, t) => s + BigInt(t.usdcAmount), 0n);
   useEffect(() => {
     for (const t of mine) if (t.side === "buy" && t.status === "pending" && t.csdAddress
       && csd.coins.filter(c => c.key.addr20 === t.csdAddress).reduce((s, c) => s + c.value, 0n) >= BigInt(t.csdAmount)) saveTrade({ ...t, status: "done" });
@@ -789,13 +815,15 @@ export default function CsdMarketPage() {
             <div className="col" style={{ gap: 14 }}>
               <div>
                 <div className="stat-label">CSD</div>
-                <div className="stat" style={{ fontSize: 22 }}>{csd.loaded ? fmtCsd(csd.balance) : "…"}</div>
+                <div className="stat" style={{ fontSize: 22 }}>{csd.loaded ? fmtCsd(csd.balance + unconfirmed) : "…"}</div>
+                {unconfirmed > 0n && <div className="faint">incl. {fmtCsd(unconfirmed)} unconfirmed, spendable after the next CSD block</div>}
                 {incoming > 0n && <div className="faint">+{fmtCsd(incoming)} CSD arriving</div>}
-                {mid !== null && csd.balance > 0n && <div className="faint">≈ {fmtUsdc((csd.balance * mid) / 100_000_000n)} USDC</div>}
+                {mid !== null && csd.balance + unconfirmed > 0n && <div className="faint">≈ {fmtUsdc(((csd.balance + unconfirmed) * mid) / 100_000_000n)} USDC</div>}
               </div>
               <div>
                 <div className="stat-label">USDC</div>
                 <div className="stat" style={{ fontSize: 22 }}>{usdcBal === null ? "…" : fmtUsdc(usdcBal)}</div>
+                {usdcIncoming > 0n && <div className="faint">+{fmtUsdc(usdcIncoming)} USDC arriving</div>}
               </div>
               <div>
                 <div className="stat-label">Receive</div>

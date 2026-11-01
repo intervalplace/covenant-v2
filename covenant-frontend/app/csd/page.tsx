@@ -100,8 +100,13 @@ const aon = aonApi("", ((u: any, i: any) => aonFetch(String(u), i)) as typeof fe
 // Anyone can be a market maker: the page finds every maker's signed offers on AON, merges them
 // into one book and sends each trade to the best price. No maker is trusted: the contract and the
 // checks below protect the trade whoever is on the other side.
-type Maker = { addr: string; sell?: any; buy?: any };
-type Market = { makers: Maker[]; asks: { price: bigint; csd: bigint }[]; bids: { price: bigint; csd: bigint }[];
+type Maker = { addr: string; sell?: any; buy?: any; proven?: boolean };
+// A maker without a settled trade yet gets trades up to this size when it has the best price (so a
+// new maker can get its first trade, and be proven, without anyone else stepping aside); larger
+// ones go to proven makers. (A maker can't take a buyer's USDC without proving its CSD payment, and a
+// seller's USDC is locked before they pay, so the most a bad new maker costs is a wait for a refund.)
+const NEW_MAKER_MAX_USDC = 5_000_000n;
+type Market = { makers: Maker[]; provenOn: { sell: boolean; buy: boolean } /* a proven maker quotes this offer side */; asks: { price: bigint; csd: bigint }[]; bids: { price: bigint; csd: bigint }[];
   bestAsk: bigint | null; bestBid: bigint | null; recent: CsdMarket["recent"] };
 type Route = { maker: string; offer: any; usdc: bigint; fee: bigint; total: bigint };
 const poolOf = (o: any): Pool => ({ usdc: BigInt(o.payload.poolUsdc), csd: BigInt(o.payload.poolCsd), spreadBps: BigInt(o.payload.spreadBps) });
@@ -238,11 +243,10 @@ async function loadMarket(read?: Reader, chain?: Chain): Promise<Market> {
   const provenNow = real.filter(o => o.how === "settled").map(o => o.signer);
   const proven = new Set([...known, ...provenBefore(), ...provenNow]);
   rememberProven(provenNow);
-  // Trades (and the book) use proven makers on each side; if none is quoting a side, any maker
-  for (const side of ["sell", "buy"] as const) {
-    const anyProven = makers.some(x => x[side] && proven.has(x.addr));
-    if (anyProven) for (const x of makers) if (!proven.has(x.addr)) x[side] = undefined;
-  }
+  // Proven makers take any trade; new ones small trades (see NEW_MAKER_MAX_USDC), or any, on a side
+  // no proven maker quotes
+  for (const x of makers) x.proven = proven.has(x.addr);
+  const provenOn = { sell: makers.some(x => x.sell && x.proven), buy: makers.some(x => x.buy && x.proven) };
   try { localStorage.setItem(OFFERS_KEY, JSON.stringify(makers.flatMap(x => [x.sell?.objectHash, x.buy?.objectHash]).filter(Boolean).slice(0, 40))); } catch {}
   // The book: every maker's levels together
   const levels = (side: "asks" | "bids") => makers.flatMap(x => { const o = side === "asks" ? x.sell : x.buy; if (!o) return []; try { return ladder(poolOf(o), 5_000_000n, 8)[side]; } catch { return []; } });
@@ -296,7 +300,7 @@ async function loadMarket(read?: Reader, chain?: Chain): Promise<Market> {
     recent = [...recent].sort((a, b) => b.at - a.at);
   } catch {}
   if (!recent.length) recent = info?.recent ?? [];
-  return { makers, asks, bids, bestAsk, bestBid, recent };
+  return { makers, provenOn, asks, bids, bestAsk, bestBid, recent };
 }
 // The best maker for a trade of `csd` (buy: least USDC to pay; sell: most USDC received), within each maker's limits
 function routes(mk: Market, side: Side, csd: bigint): Route[] {
@@ -308,6 +312,7 @@ function routes(mk: Market, side: Side, csd: bigint): Route[] {
       const usdc = side === "buy" ? quoteBuy(p, csd) : quoteSell(p, csd) - fee;
       const size = side === "buy" ? usdc + fee : usdc + CSD_SALE_EXECUTOR_FEE; // (a sale's lock also holds the executor fee)
       if (usdc <= 0n || size > BigInt(o.payload.maxTradeUsdc) || usdc < BigInt(o.payload.minTradeUsdc)) continue;
+      if (!x.proven && mk.provenOn[side === "buy" ? "sell" : "buy"] && (side === "buy" ? usdc + fee : usdc) > NEW_MAKER_MAX_USDC) continue; // (a new maker: small trades)
       out.push({ maker: String(o.payload.marketMaker), offer: o, usdc, fee, total: side === "buy" ? usdc + fee : usdc });
     } catch {}
   }
@@ -826,11 +831,11 @@ export default function CsdMarketPage() {
       let buyCsd = 0, sellUsdc = 0;
       for (const x of m.makers) {
         try {
-          if (x.sell) {
+          if (x.sell && (x.proven || !m.provenOn.sell)) {
             const p = poolOf(x.sell), C = Number(p.csd) / 1e8, P = Number(midPrice(p)) / 1e6, T = M * (1 + pct);
             if (P < T) buyCsd += Math.min(C * (1 - Math.sqrt(P / T)), C / 2); // (a pool sells at most half its CSD in one go)
           }
-          if (x.buy) {
+          if (x.buy && (x.proven || !m.provenOn.buy)) {
             const p = poolOf(x.buy), C = Number(p.csd) / 1e8, P = Number(midPrice(p)) / 1e6, T = M * (1 - pct);
             if (P > T) { const q = C * (Math.sqrt(P / T) - 1); sellUsdc += Number(quoteSell(p, BigInt(Math.round(q * 1e8)))) / 1e6; }
           }

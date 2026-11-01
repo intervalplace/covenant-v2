@@ -377,7 +377,7 @@ a.tab { text-decoration: none; text-align: center; }
 @media (max-width: 720px) {
   .exchange-grid, .exchange-grid.two-col { grid-template-columns: 1fr; }
   .order-card { order: -1; }
-  .market-stats { gap: 18px; width: 100%; justify-content: space-between; }
+  .market-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 18px; width: 100%; }
   .market-tabs { width: 100%; }
   .tab { flex: 1; padding: 8px 6px; font-size: 14px; }
   .site-nav-inner { padding: 0 16px; gap: 16px; }

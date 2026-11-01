@@ -816,6 +816,18 @@ export default function CsdMarketPage() {
 
   const wrongChain = isConnected && chainId !== CHAIN_ID;
   const mid = m?.bestAsk != null && m?.bestBid != null ? (m.bestAsk + m.bestBid) / 2n : m?.bestAsk ?? m?.bestBid ?? null;
+  // The last 24 hours, from the same verified trades as the chart: volume in USDC, and the change
+  // from the price going into the day to the latest trade
+  const day = useMemo(() => {
+    if (!m) return null;
+    const since = Date.now() / 1000 - 86400, ts = [...m.recent].sort((a, b) => a.at - b.at);
+    const inDay = ts.filter(t => t.at >= since);
+    const volume = inDay.reduce((s, t) => s + BigInt(t.usdcAmount), 0n);
+    const before = [...ts].reverse().find(t => t.at < since) ?? inDay[0];
+    const last = inDay[inDay.length - 1];
+    const change = before && last && before !== last && BigInt(before.price) > 0n ? Number((BigInt(last.price) - BigInt(before.price)) * 10_000n / BigInt(before.price)) / 100 : null;
+    return { volume, change, trades: inDay.length };
+  }, [m]);
   // A trade that moves the price a lot (a big one against a thin pool) is said plainly before it's
   // made: how far it moves the price, and what you pay on average against the price now
   const impact = (() => {
@@ -851,6 +863,8 @@ export default function CsdMarketPage() {
           <div><div className="stat-label">Price</div><div className="stat">{mid !== null ? fmtPx(mid) : "—"}</div></div>
           <div><div className="stat-label">Best bid</div><div className="stat buy">{m?.bestBid != null ? fmtPx(m.bestBid) : "—"}</div></div>
           <div><div className="stat-label">Best ask</div><div className="stat sell">{m?.bestAsk != null ? fmtPx(m.bestAsk) : "—"}</div></div>
+          <div><div className="stat-label">24h change</div><div className={"stat" + (day?.change != null ? (day.change >= 0 ? " buy" : " sell") : "")}>{day?.change != null ? `${day.change >= 0 ? "+" : ""}${day.change.toFixed(1)}%` : "—"}</div></div>
+          <div title={day ? `${day.trades} trade${day.trades === 1 ? "" : "s"} in the last 24 hours` : undefined}><div className="stat-label">24h volume</div><div className="stat">{day ? `${fmtUsdc(day.volume)} USDC` : "—"}</div></div>
           <div><div className="stat-label">Market makers</div><div className="stat">{m ? m.makers.length : "—"}</div></div>
         </div>
       </div>

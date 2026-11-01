@@ -10,7 +10,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSignMessage } from "wagmi";
 import type { Address, Hex } from "viem";
 import { CSD_WALLET_MESSAGE, deriveCsdWallet, csdNode, buildPayment, type CsdKey, type CsdUtxo } from "./csd-wallet";
-import { CSD_MM_URL } from "./config";
+import { CSD_MM_URL, CSD_NODE_URL } from "./config";
+
+// The wallet reads its coins through the market maker's CSD proxy, and from the independent CSD
+// node whenever that doesn't answer (the maker's server down, say), so it never depends on one server
+const PROXY = `${CSD_MM_URL}/api/csd`;
+const withFallback = (async (u: any, init?: any) => {
+  const url = String(u);
+  try { const r = await fetch(url, init); if (r.ok || !CSD_NODE_URL) return r; } catch (e) { if (!CSD_NODE_URL) throw e; }
+  return fetch(CSD_NODE_URL + url.slice(PROXY.length), init);
+}) as typeof fetch;
 
 const store = {
   get(k: string) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -41,7 +50,7 @@ export function useCsdWallet(account?: Address) {
   }, [k]);
 
   const wallet = useMemo(() => (secret ? deriveCsdWallet(secret) : null), [secret]);
-  const node = useMemo(() => csdNode(`${CSD_MM_URL}/api/csd`), []);
+  const node = useMemo(() => csdNode(PROXY, withFallback), []);
   const main = wallet?.key(0) ?? null;
 
   // Signs twice the first time on a device: a wallet whose signatures change

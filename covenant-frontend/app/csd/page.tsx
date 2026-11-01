@@ -816,6 +816,30 @@ export default function CsdMarketPage() {
 
   const wrongChain = isConnected && chainId !== CHAIN_ID;
   const mid = m?.bestAsk != null && m?.bestBid != null ? (m.bestAsk + m.bestBid) / 2n : m?.bestAsk ?? m?.bestBid ?? null;
+  // Depth: how much can be traded before the price moves 2% or 10%, over every maker. A pool's price
+  // after buying x of its C CSD is P·(C/(C−x))², after selling x is P·(C/(C+x))², so each pool's
+  // share has a closed form; a pool already past the mark adds nothing. (Sells are counted in the
+  // USDC they bring.)
+  const depth = useMemo(() => {
+    if (!m || !mid || mid <= 0n) return null;
+    const M = Number(mid) / 1e6, at = (pct: number) => {
+      let buyCsd = 0, sellUsdc = 0;
+      for (const x of m.makers) {
+        try {
+          if (x.sell) {
+            const p = poolOf(x.sell), C = Number(p.csd) / 1e8, P = Number(midPrice(p)) / 1e6, T = M * (1 + pct);
+            if (P < T) buyCsd += Math.min(C * (1 - Math.sqrt(P / T)), C / 2); // (a pool sells at most half its CSD in one go)
+          }
+          if (x.buy) {
+            const p = poolOf(x.buy), C = Number(p.csd) / 1e8, P = Number(midPrice(p)) / 1e6, T = M * (1 - pct);
+            if (P > T) { const q = C * (Math.sqrt(P / T) - 1); sellUsdc += Number(quoteSell(p, BigInt(Math.round(q * 1e8)))) / 1e6; }
+          }
+        } catch {}
+      }
+      return { buyCsd, sellUsdc };
+    };
+    return { two: at(0.02), ten: at(0.10) };
+  }, [m, mid]);
   // The last 24 hours, from the same verified trades as the chart: volume in USDC, and the change
   // from the price going into the day to the latest trade
   const day = useMemo(() => {
@@ -884,6 +908,13 @@ export default function CsdMarketPage() {
                 <span className="last">{mid !== null ? fmtPx(mid) : "—"}</span>
               </div>
               <div className="book-side">{bids.map((l, i) => row(l, i, "buy", bids))}</div>
+              {depth && (
+                <div className="faint" style={{ margin: "12px 6px 0", fontSize: 13, lineHeight: 1.6 }} title="How much can be traded, across all market makers, before the price moves this far">
+                  <div className="row-between"><span>Depth to move the price 2%</span><span>{fmtCsd(BigInt(Math.floor(depth.two.buyCsd * 1e8)), 0)} CSD · {fmtUsdc(BigInt(Math.floor(depth.two.sellUsdc * 1e6)))} USDC</span></div>
+                  <div className="row-between"><span>10%</span><span>{fmtCsd(BigInt(Math.floor(depth.ten.buyCsd * 1e8)), 0)} CSD · {fmtUsdc(BigInt(Math.floor(depth.ten.sellUsdc * 1e6)))} USDC</span></div>
+                  <div style={{ fontSize: 12, marginTop: 2 }}>CSD to buy · USDC to sell</div>
+                </div>
+              )}
             </>
           )}
         </section>

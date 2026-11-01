@@ -798,6 +798,14 @@ export default function CsdMarketPage() {
 
   const wrongChain = isConnected && chainId !== CHAIN_ID;
   const mid = m?.bestAsk != null && m?.bestBid != null ? (m.bestAsk + m.bestBid) / 2n : m?.bestAsk ?? m?.bestBid ?? null;
+  // A trade that moves the price a lot (a big one against a thin pool) is said plainly before it's
+  // made: how far it moves the price, and what you pay on average against the price now
+  const impact = (() => {
+    if (!execution || !mid || mid <= 0n) return null;
+    const moved = Number(((side === "buy" ? execution.after - mid : mid - execution.after) * 10_000n) / mid) / 100;
+    const vsNow = Number(((side === "buy" ? execution.avg - mid : mid - execution.avg) * 10_000n) / mid) / 100;
+    return moved >= 10 ? { moved, vsNow } : null;
+  })();
 
   return (
     <main style={{ maxWidth: 1240, margin: "0 auto", padding: "0 24px" }}>
@@ -881,12 +889,19 @@ export default function CsdMarketPage() {
             </div>
           </div>
           {problem && <div className="form-problem danger" role="alert">{problem}</div>}
+          {!problem && impact && execution && mid && (
+            <div className="form-problem warn" role="alert" style={{ background: "var(--warn-bg, #fff7e6)", border: "1px solid var(--warn-border, #f0d29a)", borderRadius: 8, padding: "10px 12px" }}>
+              <strong>This trade moves the price {impact.moved.toFixed(0)}%</strong>, from {fmtPx(mid)} to {fmtPx(execution.after)}.
+              {" "}You {side === "buy" ? "pay" : "get"} {fmtPx(execution.avg)} per CSD on average, {Math.abs(impact.vsNow).toFixed(0)}% {side === "buy" ? (impact.vsNow >= 0 ? "above" : "below") : (impact.vsNow >= 0 ? "below" : "above")} the price now.
+              {" "}The market is thin: splitting it into smaller {side === "buy" ? "buys" : "sales"} moves the price just as far in total.
+            </div>
+          )}
           {!isConnected ? (
             <button className="btn btn-lg" onClick={() => connect({ connector: injected() })}>Connect wallet to trade</button>
           ) : (
             <button className={`btn-lg ${side === "buy" ? "btn-buy" : "btn-sell"}`} onClick={side === "buy" ? buy : sell}
               disabled={!!busy || !CSD_ENABLED || wrongChain || (csd.ready && (!preview || !!problem))}>
-              {busy ?? (wrongChain ? "Switch to Ethereum" : !csd.ready ? "Open your CSD wallet" : side === "buy" ? "Buy CSD" : "Sell CSD")}
+              {busy ?? (wrongChain ? "Switch to Ethereum" : !csd.ready ? "Open your CSD wallet" : (side === "buy" ? "Buy CSD" : "Sell CSD") + (impact ? " anyway" : ""))}
             </button>
           )}
         </section>

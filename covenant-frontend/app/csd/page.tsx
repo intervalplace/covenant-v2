@@ -943,6 +943,11 @@ export default function CsdMarketPage() {
                 <div className="col" style={{ gap: 8, marginTop: 10 }}>
                   <input value={sendTo} onChange={e => setSendTo(e.target.value)} placeholder="CSD address (40 characters)" autoComplete="off" spellCheck={false} />
                   <div className="field-unit"><input inputMode="decimal" value={sendAmt} onChange={e => setSendAmt(e.target.value.replace(",", "."))} placeholder="0.00" /><span className="unit">CSD</span></div>
+                  {/* Max: all of it that can be sent now, less the network fee (0.0001 CSD) */}
+                  <div className="row-between faint" style={{ fontSize: 13 }}>
+                    <span>{fmtCsd(csd.balance > 10_000n ? csd.balance - 10_000n : 0n)} CSD can be sent now</span>
+                    <button type="button" className="link-btn" disabled={csd.balance <= 10_000n} onClick={() => setSendAmt(formatUnits(csd.balance - 10_000n, 8))}>Max</button>
+                  </div>
                   <button className="btn-secondary" onClick={sendCsd} disabled={!!busy}>Send</button>
                 </div>
               </details>

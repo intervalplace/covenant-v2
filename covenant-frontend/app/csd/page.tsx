@@ -333,13 +333,24 @@ function PriceChart({ trades }: { trades: CsdMarket["recent"] }) {
   const [range, setRange] = useState<"24h" | "7d">(() => { try { return (localStorage.getItem("covenant.csd.chart") as any) === "7d" ? "7d" : "24h"; } catch { return "24h"; } });
   const pick = (r: "24h" | "7d") => { setRange(r); try { localStorage.setItem("covenant.csd.chart", r); } catch {} };
   const W = 1000, H = 160, P = 8, now = Date.now(), x0 = now - (range === "24h" ? 86400_000 : 7 * 86400_000), x1 = now;
-  const all = [...trades].map(t => ({ at: t.at * 1000, price: Number(t.price) / 1e6, side: t.side })).sort((a, b) => a.at - b.at);
+  const all = [...trades].map(t => ({ at: t.at * 1000, price: Number(t.price) / 1e6, side: t.side, csd: Number(t.csdAmount) / 1e8 })).sort((a, b) => a.at - b.at);
   const inRange = all.filter(t => t.at >= x0);
   const before = [...all].reverse().find(t => t.at < x0); // (the line starts at the price going into the range)
   const pts = before ? [{ ...before, at: x0 }, ...inRange] : inRange;
   const ys = pts.map(p => p.price);
   let y0 = Math.min(...ys), y1 = Math.max(...ys); if (y1 - y0 < y1 * 0.02) { y0 -= y1 * 0.01; y1 += y1 * 0.01; }
-  const X = (t: number) => P + ((t - x0) / (x1 - x0)) * (W - 2 * P), Y = (v: number) => H - P - ((v - y0) / Math.max(1e-12, y1 - y0)) * (H - 2 * P);
+  // Round prices for the axis (3 to 5 lines), and room around them so no dot sits on the edge
+  const hi = Math.max(...ys), lo = Math.min(...ys); // (the real high and low, before the axis is rounded)
+  const ticks: number[] = [];
+  if (pts.length) {
+    const rough = (y1 - y0) / 3, mag = 10 ** Math.floor(Math.log10(rough));
+    const step = [1, 2, 2.5, 5, 10].map(k => k * mag).find(x => x >= rough) ?? 10 * mag;
+    y0 = Math.floor(y0 / step) * step; y1 = Math.ceil(y1 / step) * step; if (y1 === y0) y1 = y0 + step;
+    for (let v = y0; v <= y1 + step / 2; v += step) ticks.push(Number(v.toFixed(8)));
+  }
+  const dec = (v: number) => (v >= 1 ? 2 : v >= 0.1 ? 3 : 4);
+  const PL = 70, PR = 90; // (room for the price axis on the left and the latest price on the right)
+  const X = (t: number) => PL + ((t - x0) / (x1 - x0)) * (W - PL - PR), Y = (v: number) => H - P - ((v - y0) / Math.max(1e-12, y1 - y0)) * (H - 2 * P);
   let d = pts.length ? `M${X(pts[0].at)},${Y(pts[0].price)}` : "";
   for (let i = 1; i < pts.length; i++) d += ` H${X(pts[i].at)} V${Y(pts[i].price)}`;
   if (pts.length) d += ` H${X(x1)}`;
@@ -351,17 +362,24 @@ function PriceChart({ trades }: { trades: CsdMarket["recent"] }) {
       <div className="row-between" style={{ marginBottom: 6 }}>
         <span className="stat-label">Trade price (USDC per CSD)</span>
         <span style={{ display: "flex", gap: 14, alignItems: "center" }}>
-          {pts.length > 0 && <span className="faint">{y1.toFixed(4)} high · {y0.toFixed(4)} low · {inRange.length} trade{inRange.length === 1 ? "" : "s"}</span>}
+          {pts.length > 0 && <span className="faint">{hi.toFixed(4)} high · {lo.toFixed(4)} low · {inRange.length} trade{inRange.length === 1 ? "" : "s"}</span>}
           {tab("24h", "24h")}{tab("7d", "7d")}
         </span>
       </div>
       {pts.length === 0 ? <div className="book-empty" style={{ height: 140, display: "grid", placeItems: "center" }}>No trades in the last {range === "24h" ? "24 hours" : "7 days"}.</div> : (
-        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: 140, display: "block" }} role="img"
+        <div style={{ position: "relative", height: 140 }}>
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: 140, display: "block", position: "absolute", inset: 0 }} role="img"
           aria-label={`Trade price over the last ${range === "24h" ? "24 hours" : "7 days"}, from ${pts[0].price.toFixed(4)} to ${pts[pts.length - 1].price.toFixed(4)} USDC`}>
+          {ticks.map(v => <line key={v} x1={0} x2={W} y1={Y(v)} y2={Y(v)} stroke="currentColor" strokeOpacity="0.09" strokeWidth="1" vectorEffect="non-scaling-stroke" />)}
           <path d={d} fill="none" stroke={up ? "var(--buy, #2f7d5b)" : "var(--sell, #b4473c)"} strokeWidth="2.5" vectorEffect="non-scaling-stroke" />
           {/* (a dot per trade: a zero-length round stroke, which stays round however the chart stretches) */}
-          {inRange.map((t, i) => <path key={i} d={`M${X(t.at)},${Y(t.price)} h0`} stroke={t.side === "buy" ? "var(--buy, #2f7d5b)" : "var(--sell, #b4473c)"} strokeWidth="8" strokeLinecap="round" vectorEffect="non-scaling-stroke" />)}
+          {inRange.map((t, i) => <path key={i} d={`M${X(t.at)},${Y(t.price)} h0`} stroke={t.side === "buy" ? "var(--buy, #2f7d5b)" : "var(--sell, #b4473c)"} strokeWidth="8" strokeLinecap="round" vectorEffect="non-scaling-stroke">
+            <title>{`${t.side === "buy" ? "Bought" : "Sold"} ${t.csd.toLocaleString(undefined, { maximumFractionDigits: 2 })} CSD at ${t.price.toFixed(4)} · ${new Date(t.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`}</title></path>)}
         </svg>
+        {/* the price axis and the latest price, as text over the chart (so it isn't stretched with it) */}
+        {ticks.map(v => <span key={v} className="faint" style={{ position: "absolute", left: 0, top: `${(Y(v) / H) * 100}%`, transform: "translateY(-50%)", fontSize: 11, lineHeight: 1, padding: "1px 4px 1px 0", background: "var(--card-bg, #fff)" }}>{v.toFixed(dec(v))}</span>)}
+        <span style={{ position: "absolute", right: 0, top: `${(Y(pts[pts.length - 1].price) / H) * 100}%`, transform: "translateY(-50%)", fontSize: 12, fontWeight: 600, lineHeight: 1, padding: "3px 6px", borderRadius: 6, color: "#fff", background: up ? "var(--buy, #2f7d5b)" : "var(--sell, #b4473c)" }}>{pts[pts.length - 1].price.toFixed(4)}</span>
+        </div>
       )}
       <div className="row-between faint" style={{ marginTop: 4 }}><span>{when(x0)}</span><span>now</span></div>
     </section>

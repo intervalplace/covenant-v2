@@ -6,7 +6,7 @@ import {
   useAccount, useConnect, useDisconnect, useBalance,
   useReadContracts, useWriteContract, usePublicClient, useSignTypedData,
 } from "wagmi";
-import { injected } from "@wagmi/core";
+import { browserWallet } from "@/providers";
 import { maxUint256, formatUnits, type Address, type Hex } from "viem";
 import {
   MARKETS, SETTLEMENT_CONTRACT, CHAIN_ID, DEMO_MODE, TOKENS,
@@ -934,7 +934,7 @@ export default function Home() {
               {loading ?? (isWrongChain ? "Switch to Ethereum to trade" : wrapNeeded > 0n ? `Wrap and sell ${B}` : `Sign and ${side} ${B}`)}
             </button>
           ) : (
-            <button className="btn btn-lg" onClick={() => connect({ connector: injected() })}>Connect wallet to trade</button>
+            <button className="btn btn-lg" onClick={() => connect({ connector: browserWallet })}>Connect wallet to trade</button>
           )}
           <p className="faint" style={{ lineHeight: 1.5 }}>
             {wrapNeeded > 0n

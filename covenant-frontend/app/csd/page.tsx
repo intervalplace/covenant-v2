@@ -8,7 +8,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAccount, useConnect, usePublicClient, useSignTypedData, useWriteContract } from "wagmi";
-import { injected } from "@wagmi/core";
+import { browserWallet } from "@/providers";
 import { decodeEventLog, formatUnits, hashTypedData, keccak256, parseAbiItem, parseUnits, recoverTypedDataAddress, toHex, type Address, type Hex } from "viem";
 import { CHAIN_ID } from "@/config";
 import { MarketTabs } from "@/market-tabs";
@@ -897,7 +897,7 @@ export default function CsdMarketPage() {
             </div>
           )}
           {!isConnected ? (
-            <button className="btn btn-lg" onClick={() => connect({ connector: injected() })}>Connect wallet to trade</button>
+            <button className="btn btn-lg" onClick={() => connect({ connector: browserWallet })}>Connect wallet to trade</button>
           ) : (
             <button className={`btn-lg ${side === "buy" ? "btn-buy" : "btn-sell"}`} onClick={side === "buy" ? buy : sell}
               disabled={!!busy || !CSD_ENABLED || wrongChain || (csd.ready && (!preview || !!problem))}>

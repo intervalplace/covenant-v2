@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
-import { injected } from "@wagmi/core";
+import { browserWallet } from "@/providers";
 import { CHAIN_ID } from "./config";
 import { aonFetch, onNodeStatus, readOverrides, writeOverrides, DEFAULT_AON_NODES, DEFAULT_RPCS, type NodeStatus } from "./endpoints";
 import { Arc } from "./arc";
@@ -104,7 +104,7 @@ export function SiteNav() {
               {address?.slice(0, 6)}…{address?.slice(-4)}
             </button>
           ) : (
-            <button className="btn wallet-chip" onClick={() => connect({ connector: injected() })}>Connect wallet</button>
+            <button className="btn wallet-chip" onClick={() => connect({ connector: browserWallet })}>Connect wallet</button>
           ))}
         </div>
       </div>

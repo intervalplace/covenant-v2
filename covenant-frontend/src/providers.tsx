@@ -1,6 +1,6 @@
 "use client";
 import { WagmiProvider, createConfig, http, fallback, custom } from "wagmi";
-import { rpcPlan, walletReader } from "./endpoints";
+import { rpcPlan, walletReader, safeEthereum } from "./endpoints";
 import { mainnet } from "wagmi/chains";
 import { injected } from "@wagmi/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -20,7 +20,7 @@ const isDev = process.env.NEXT_PUBLIC_CHAIN_ID === "31337";
 // NEXT_PUBLIC_ETH_RPC_URL and public fallbacks. If one fails, the next is used.
 function mainnetTransport() {
   const { override, rest } = rpcPlan();
-  const eth = typeof window !== "undefined" ? (window as any).ethereum : undefined;
+  const eth = typeof window !== "undefined" ? safeEthereum((() => { try { return (window as any).ethereum; } catch { return undefined; } })()) : undefined;
   return fallback([
     ...override.map(u => http(u)),
     ...(eth ? [custom(walletReader(eth, mainnet.id))] : []),
@@ -28,18 +28,24 @@ function mainnetTransport() {
   ]);
 }
 
+// The browser's wallet, through safeEthereum (see there). Used for every Connect button.
+export const browserWallet = injected({ target: () => ({ id: "injected", name: "Browser wallet",
+  provider: (w?: any) => safeEthereum((() => { try { return w?.ethereum; } catch { return undefined; } })()) }) });
+
 const mainnetConfig = createConfig({
   chains:     [mainnet],
-  connectors: [injected()],
+  connectors: [browserWallet],
   transports: { [mainnet.id]: mainnetTransport() },
   ssr: true,
+  multiInjectedProviderDiscovery: false, // (only the wallet above, through the safe wrapper)
 });
 
 const hardhatConfig = createConfig({
   chains:     [hardhat],
-  connectors: [injected()],
+  connectors: [browserWallet],
   transports: { [hardhat.id]: http("http://127.0.0.1:8545") },
   ssr: true,
+  multiInjectedProviderDiscovery: false, // (only the wallet above, through the safe wrapper)
 });
 
 const queryClient = new QueryClient();

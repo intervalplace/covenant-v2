@@ -97,6 +97,23 @@ const READ_METHODS = new Set([
 
 type Eip1193 = { request: (a: { method: string; params?: any }) => Promise<any>; on?: (e: string, f: (x: any) => void) => void };
 
+// The browser's wallet object, made safe to use. Some (Brave's built-in wallet on Android) throw
+// as soon as certain properties are read, e.g. `.on`, which crashed the whole page on load. Every
+// read goes through try/catch here: what fails is skipped (no wallet events from it), and the rest
+// works as usual.
+export function safeEthereum(eth: any): any {
+  if (!eth) return undefined;
+  const get = (k: string) => { try { return eth[k]; } catch { return undefined; } };
+  const call = (k: string, args: any[]) => { const f = get(k); if (typeof f !== "function") return undefined; try { return f.apply(eth, args); } catch { return undefined; } };
+  const w: any = {
+    request: (args: any) => { const f = get("request"); if (typeof f !== "function") return Promise.reject(new Error("WALLET_UNAVAILABLE")); return f.call(eth, args); },
+    on: (e: string, fn: any) => { call("on", [e, fn]); return w; },
+    removeListener: (e: string, fn: any) => { call("removeListener", [e, fn]); return w; },
+  };
+  for (const k of ["isMetaMask", "isBraveWallet", "isCoinbaseWallet", "isRabby", "isTrust", "providers"]) Object.defineProperty(w, k, { get: () => get(k), enumerable: true });
+  return w;
+}
+
 export function walletReader(eth: Eip1193, expectedChainId: number): Eip1193 {
   let chain: number | null = null, connected = false, checkedAt = 0;
   const refresh = async () => {

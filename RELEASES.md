@@ -12,6 +12,7 @@ to check one.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
+| v1.1.13 | `bafybeihrv45km2jbkauwwh2mqlyooolnrteuhmzs4j36f22fwryqhhppry` | `0fe6c6c83301` | 2026-11-01 | CSD/USDC: 24h volume and 24h change, from verified trades; the stats wrap into two rows on phones. |
 | v1.1.12 | `bafybeicu2vixhozuapp4e3mphvfff2vkjv6zoqesxevdcidxgfjxy73lwq` | `16e89f4baa28` | 2026-11-01 | CSD/USDC: the chart has a price axis, the latest price, and each trade's details on hover. |
 | v1.1.11 | `bafybeigrt2twfvd3kz22pdzbgn55a3n7poa5ec2modyivm7bjbcmkxwdqq` | `370ba91bec18` | 2026-11-01 | Works with Brave's built-in wallet on Android (the site crashed on load there). |
 | v1.1.10 | `bafybeifftwebnrs6dq27abrosmwi6gp7knjwgotxf3j3u2tpyufl3nm7ci` | `2486e2fd26dd` | 2026-11-01 | CSD wallet: Send has a Max button (all that can be sent now, less the network fee). |

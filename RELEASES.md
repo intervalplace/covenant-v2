@@ -12,6 +12,7 @@ to check one.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
+| v1.1.10 | `bafybeifftwebnrs6dq27abrosmwi6gp7knjwgotxf3j3u2tpyufl3nm7ci` | `2486e2fd26dd` | 2026-11-01 | CSD wallet: Send has a Max button (all that can be sent now, less the network fee). |
 | v1.1.9 | `bafybeib43dtbyzh242makyjlel77t2gqj26bmqp4buzwevkyksquztzgii` | `8d6193cf12f5` | 2026-11-01 | CSD/USDC: a trade that moves the price 10% or more says so before it's made (how far, and your average against the price now). |
 | v1.1.8 | `bafybeig35dox66fcescsnqzdbymciaseulmuzkfnx4vtstna2xbvnyqwai` | `ccbb9bb05eff` | 2026-11-01 | A page cached from an earlier release no longer crashes (earlier releases' scripts stay available, and it reloads once if needed); other errors show what failed. |
 | v1.1.7 | `bafybeiej4momb56cpntbowxrydiqtatmpi4qofdjcx5zpv4jlwcekk7goq` | `7c8b276d72f7` | 2026-10-31 | CSD/USDC: the chart shows real trades (checked on Ethereum) over 24 hours or 7 days, instead of makers' quoted prices. |

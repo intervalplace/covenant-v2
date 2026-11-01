@@ -12,6 +12,7 @@ to check one.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
+| v1.1.15 | `bafybeih4bhn4vwzuu6yarmfpf5e6rs7k3ya4sptr6yzhitqfselgldbdea` | `53b664b6f44c` | 2026-11-01 | CSD/USDC: a new market maker gets trades up to 5 USDC when it has the best price, and shows in the book, so it can be proven without other makers stepping aside. |
 | v1.1.14 | `bafybeihxfrnvbh2hq3hwbhqafiavrede72oq7b3vdia7ndqtntos74bjhy` | `8fa0478d10ef` | 2026-11-01 | CSD/USDC: market depth under the order book (2% and 10%, over every maker); the CSD wallet falls back to the independent CSD node if the market maker's proxy is down. |
 | v1.1.13 | `bafybeihrv45km2jbkauwwh2mqlyooolnrteuhmzs4j36f22fwryqhhppry` | `0fe6c6c83301` | 2026-11-01 | CSD/USDC: 24h volume and 24h change, from verified trades; the stats wrap into two rows on phones. |
 | v1.1.12 | `bafybeicu2vixhozuapp4e3mphvfff2vkjv6zoqesxevdcidxgfjxy73lwq` | `16e89f4baa28` | 2026-11-01 | CSD/USDC: the chart has a price axis, the latest price, and each trade's details on hover. |

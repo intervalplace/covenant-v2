@@ -12,6 +12,7 @@ to check one.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
+| v1.1.8 | `bafybeig35dox66fcescsnqzdbymciaseulmuzkfnx4vtstna2xbvnyqwai` | `ccbb9bb05eff` | 2026-11-01 | A page cached from an earlier release no longer crashes (earlier releases' scripts stay available, and it reloads once if needed); other errors show what failed. |
 | v1.1.7 | `bafybeiej4momb56cpntbowxrydiqtatmpi4qofdjcx5zpv4jlwcekk7goq` | `7c8b276d72f7` | 2026-10-31 | CSD/USDC: the chart shows real trades (checked on Ethereum) over 24 hours or 7 days, instead of makers' quoted prices. |
 | v1.1.6 | `bafybeidwnbtpug3ebjovcjtwx2tyk2zktaca5b73upw4wdcqkh7idtisvy` | `06503b869e11` | 2026-10-31 | CSD/USDC: buys show in Recent trades when they happen (USDC locked on Ethereum, the maker's signed CSD payment in a CSD block), not when the maker settles. |
 | v1.1.5 | `bafybeihebx5kf53ri5ayob7f63fqzqqveakvdy5l4gc3ylxhbsdhpfbzpe` | `e18e72f697b9` | 2026-10-31 | CSD/USDC: opening your CSD wallet on a new device finds all your CSD, also past addresses left unused by buys that didn't happen. |

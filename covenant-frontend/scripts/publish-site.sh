@@ -18,7 +18,11 @@ fi
 npm ci --no-audit --no-fund --loglevel=error
 npm run release:ipfs            # builds ./out and prints its IPFS CID
 NEW="$DIR.new.$$"; rm -rf "$NEW"; mkdir -p "$(dirname "$DIR")"
-cp -a out "$NEW"; chmod -R a+rX "$NEW"
+cp -a out "$NEW"
+# Earlier releases' scripts stay too (their names are unique per build): a browser showing a cached
+# page from an earlier release still finds the scripts that page asks for, instead of crashing
+[ -d "$DIR/_next/static" ] && cp -an "$DIR/_next/static/." "$NEW/_next/static/" 2>/dev/null || true
+chmod -R a+rX "$NEW"
 [ -d "$DIR" ] && rm -rf "$DIR.previous" && mv "$DIR" "$DIR.previous"
 mv "$NEW" "$DIR"
 echo "Published to $DIR (previous version kept in $DIR.previous)."

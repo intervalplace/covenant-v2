@@ -63,6 +63,28 @@ const hardhatConfig = createConfig({
   multiInjectedProviderDiscovery: false, // (only the wallet above, through the safe wrapper)
 });
 
+// Each wallet extension announces itself (EIP-6963), so with several installed the user can pick
+// one, even when another has taken window.ethereum. Wagmi's own discovery is off because it uses the
+// raw provider objects; these go through the same safe wrapper as the default wallet.
+function discoverWallets(config: any) {
+  if (typeof window === "undefined") return;
+  const add = (e: any) => {
+    try {
+      const { info, provider } = e?.detail ?? {};
+      if (!info?.rdns || !provider) return;
+      config._internal.connectors.setState((list: any[]) => {
+        if (list.some(c => c.id === info.rdns)) return list;
+        const c = config._internal.connectors.setup(injected({ target: {
+          id: info.rdns, name: String(info.name || info.rdns), icon: info.icon, provider: safeEthereum(provider) } }));
+        return [...list, c];
+      });
+    } catch { /* a wallet that announces something unusable is skipped */ }
+  };
+  window.addEventListener("eip6963:announceProvider", add as EventListener);
+  try { window.dispatchEvent(new Event("eip6963:requestProvider")); } catch { /* ignore */ }
+}
+discoverWallets(isDev ? hardhatConfig : mainnetConfig);
+
 const queryClient = new QueryClient();
 
 export function Providers({ children }: { children: React.ReactNode }) {

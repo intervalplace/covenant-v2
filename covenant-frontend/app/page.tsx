@@ -3,10 +3,10 @@
 import { ComposedChart, Line, Scatter, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
-  useAccount, useConnect, useDisconnect, useBalance,
+  useAccount, useDisconnect, useBalance,
   useReadContracts, useWriteContract, usePublicClient, useSignTypedData,
 } from "wagmi";
-import { browserWallet } from "@/providers";
+import { ConnectWallet } from "@/connect";
 import { maxUint256, formatUnits, type Address, type Hex } from "viem";
 import {
   MARKETS, SETTLEMENT_CONTRACT, CHAIN_ID, DEMO_MODE, TOKENS,
@@ -46,7 +46,6 @@ export default function Home() {
   useEffect(() => setMounted(true), []);
 
   const { address, isConnected, chainId } = useAccount();
-  const { connect }    = useConnect();
   const { disconnect } = useDisconnect();
   const { signTypedDataAsync } = useSignTypedData();
   const { writeContractAsync } = useWriteContract();
@@ -934,7 +933,7 @@ export default function Home() {
               {loading ?? (isWrongChain ? "Switch to Ethereum to trade" : wrapNeeded > 0n ? `Wrap and sell ${B}` : `Sign and ${side} ${B}`)}
             </button>
           ) : (
-            <button className="btn btn-lg" onClick={() => connect({ connector: browserWallet })}>Connect wallet to trade</button>
+            <ConnectWallet className="btn btn-lg" label="Connect wallet to trade" />
           )}
           <p className="faint" style={{ lineHeight: 1.5 }}>
             {wrapNeeded > 0n

@@ -25,6 +25,10 @@ const nextConfig = {
     config.resolve.alias = {
       ...config.resolve.alias,
       "@react-native-async-storage/async-storage": false,
+      // wagmi/connectors re-exports every connector; we only use walletConnect. The Base Account
+      // connector pulls in an SDK with optional packages that aren't installed, so leave it out.
+      "@base-org/account": false,
+      "pino-pretty": false, // optional pretty logger of the WalletConnect SDK
     };
     return config;
   },

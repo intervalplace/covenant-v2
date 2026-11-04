@@ -7,8 +7,8 @@
 // Ethereum, and only then does the in-site CSD wallet pay.
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useAccount, useConnect, usePublicClient, useSignTypedData, useWriteContract } from "wagmi";
-import { browserWallet } from "@/providers";
+import { useAccount, usePublicClient, useSignTypedData, useWriteContract } from "wagmi";
+import { ConnectWallet } from "@/connect";
 import { decodeEventLog, formatUnits, hashTypedData, keccak256, parseAbiItem, parseUnits, recoverTypedDataAddress, toHex, type Address, type Hex } from "viem";
 import { CHAIN_ID } from "@/config";
 import { MarketTabs } from "@/market-tabs";
@@ -393,7 +393,6 @@ function PriceChart({ trades }: { trades: CsdMarket["recent"] }) {
 
 export default function CsdMarketPage() {
   const { address, isConnected, chainId } = useAccount();
-  const { connect } = useConnect();
   const publicClient = usePublicClient();
   const { signTypedDataAsync } = useSignTypedData();
   const { writeContractAsync } = useWriteContract();
@@ -965,7 +964,7 @@ export default function CsdMarketPage() {
             </div>
           )}
           {!isConnected ? (
-            <button className="btn btn-lg" onClick={() => connect({ connector: browserWallet })}>Connect wallet to trade</button>
+            <ConnectWallet className="btn btn-lg" label="Connect wallet to trade" />
           ) : (
             <button className={`btn-lg ${side === "buy" ? "btn-buy" : "btn-sell"}`} onClick={side === "buy" ? buy : sell}
               disabled={!!busy || !CSD_ENABLED || wrongChain || (csd.ready && (!preview || !!problem))}>

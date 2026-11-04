@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { useAccount, useConnect, useDisconnect } from "wagmi";
-import { browserWallet } from "@/providers";
+import { useAccount, useDisconnect } from "wagmi";
+import { ConnectWallet } from "@/connect";
 import { CHAIN_ID } from "./config";
 import { aonFetch, onNodeStatus, readOverrides, writeOverrides, DEFAULT_AON_NODES, DEFAULT_RPCS, type NodeStatus } from "./endpoints";
 import { Arc } from "./arc";
@@ -69,7 +69,6 @@ export function SiteNav() {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   const { address, isConnected, chainId } = useAccount();
-  const { connect } = useConnect();
   const { disconnect } = useDisconnect();
   const st = useNodeStatus();
   const up = st.checked ? st.ok : null;
@@ -104,7 +103,7 @@ export function SiteNav() {
               {address?.slice(0, 6)}…{address?.slice(-4)}
             </button>
           ) : (
-            <button className="btn wallet-chip" onClick={() => connect({ connector: browserWallet })}>Connect wallet</button>
+            <ConnectWallet className="btn wallet-chip" />
           ))}
         </div>
       </div>

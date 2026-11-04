@@ -387,3 +387,8 @@ a.tab { text-decoration: none; text-align: center; }
   * { transition: none !important; animation: none !important; }
   .arc-draw { stroke-dashoffset: 0; }
 }
+
+/* Connect wallet menu */
+.connect-wrap { position: relative; display: inline-flex; flex-direction: column; align-items: stretch; }
+.connect-menu { display: flex; flex-direction: column; gap: 10px; width: min(320px, calc(100vw - 32px)); text-align: left; }
+.connect-error { font-size: 13px; margin-top: 6px; max-width: 320px; }

@@ -901,7 +901,9 @@ export default function CsdMarketPage() {
       <h1 className="cv-sentence">You {done.side === "buy" ? "bought" : "sold"} <strong>{fmtCsd(BigInt(done.csdAmount))} CSD</strong> for <strong>{fmtUsdc(BigInt(done.usdcAmount))} USDC</strong>.</h1>
       <div className="cv-act">
         <button className="btn cv-go cv-go-dark" onClick={() => { setJustDone(null); setSide(done.side); }}>{done.side === "buy" ? "Buy more" : "Sell more"}</button>
-        {done.receipt && <a className="cv-receipt" href={aonLink(done.receipt)} target="_blank" rel="noreferrer">Receipt</a>}
+        {/* the final receipt once it's out; until then the trade's signed order, whose record on AON
+            already links the offer, the maker's answer and the payment, and gains the receipt */}
+        {(done.receipt ?? done.aonAuth) && <a className="cv-receipt" href={aonLink((done.receipt ?? done.aonAuth)!)} target="_blank" rel="noreferrer">Receipt</a>}
       </div>
     </section>
   ) : (
@@ -1007,7 +1009,7 @@ export default function CsdMarketPage() {
               ? <button className="link-btn" onClick={() => refund(t)} disabled={!!busy} title="The market maker didn't deliver in time. Take your USDC back (costs a little ETH).">Refund</button>
               : t.side === "sell" && t.status === "pending" && t.csdTxid && Date.now() - t.at > 10 * 60_000
               ? <button className="link-btn" onClick={() => claim(t)} disabled={!!busy} title="The market maker hasn't released it. Claim the USDC yourself with a proof of your CSD payment (costs a little ETH).">Claim</button>
-              : t.receipt ? <a href={aonLink(t.receipt)} target="_blank" rel="noreferrer">Receipt</a>
+              : t.status !== "failed" && (t.receipt ?? t.aonAuth) ? <a href={aonLink((t.receipt ?? t.aonAuth)!)} target="_blank" rel="noreferrer">Receipt</a>
               : (t.releaseTx ?? t.lockTx) && <a href={etherscanTx((t.releaseTx ?? t.lockTx)!)} target="_blank" rel="noreferrer">Transaction</a>}</td>
           </tr>
         ))}

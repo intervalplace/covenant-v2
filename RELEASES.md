@@ -12,6 +12,7 @@ to check one.
 
 | Version | CID | Commit | Date | Notes |
 |---|---|---|---|---|
+| v1.1.19 | `bafybeiaagkx444xtehi4lsdegnjjydnlpsuqiwcetc4u4qqoigsqwez2pe` | `f5ee9d4979bf` | 2026-11-05 | Receipt on a finished trade from the first second: the trade's signed order on AON, then the final receipt once it's out. |
 | v1.1.18 | `bafybeihwvlbxlyigx7j5ycz3xp6qdcbqhbkixsjqsds2voo4grabvcvyr4` | `c48f97c7a950` | 2026-11-05 | CSD/USDC is the front page; ETH/USDC moves to /eth/. |
 | v1.1.17 | `bafybeie35quhixieqnv4d5yx7j3mtxj2ubpkp4g4bqfzofwxj5owmevqgi` | `8e9a1163fb3b` | 2026-11-05 | CSD trading as one sentence and one button; after a trade, only what happened. Book, chart and recent trades move to Market. |
 | v1.1.16 | `bafybeiax4lzrdgv4s7c3vlpqysoyzf2uitqmza2fdurug6r4tpco5ufdcq` | `0027f056ff56` | 2026-11-04 | Connect wallet works with several wallet extensions installed (each announces itself; with more than one you pick), and a click never silently does nothing: without a wallet the menu says what to do, and errors show. |

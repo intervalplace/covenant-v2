@@ -12,8 +12,8 @@ export function MarketTabs({ active }: { active: string }) {
   );
   return (
     <div className="market-tabs" role="tablist" aria-label="Market">
-      {tab("/", evm.key, evm.label)}
-      {tab("/csd/", "CSD-USDC", "CSD / USDC")}
+      {tab("/eth/", evm.key, evm.label)}
+      {tab("/", "CSD-USDC", "CSD / USDC")}
     </div>
   );
 }

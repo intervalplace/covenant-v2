@@ -367,7 +367,7 @@ function PriceChart({ trades }: { trades: CsdMarket["recent"] }) {
       <div className="row-between" style={{ marginBottom: 6 }}>
         <span className="stat-label">Trade price (USDC per CSD)</span>
         <span style={{ display: "flex", gap: 14, alignItems: "center" }}>
-          {pts.length > 0 && <span className="faint">{hi.toFixed(4)} high · {lo.toFixed(4)} low · {inRange.length} trade{inRange.length === 1 ? "" : "s"}</span>}
+          {pts.length > 0 && <span className="faint">High {hi.toFixed(4)}, low {lo.toFixed(4)}, {inRange.length} trade{inRange.length === 1 ? "" : "s"}</span>}
           {tab("24h", "24h")}{tab("7d", "7d")}
         </span>
       </div>
@@ -379,7 +379,7 @@ function PriceChart({ trades }: { trades: CsdMarket["recent"] }) {
           <path d={d} fill="none" stroke={up ? "var(--buy, #2f7d5b)" : "var(--sell, #b4473c)"} strokeWidth="2.5" vectorEffect="non-scaling-stroke" />
           {/* (a dot per trade: a zero-length round stroke, which stays round however the chart stretches) */}
           {inRange.map((t, i) => <path key={i} d={`M${X(t.at)},${Y(t.price)} h0`} stroke={t.side === "buy" ? "var(--buy, #2f7d5b)" : "var(--sell, #b4473c)"} strokeWidth="8" strokeLinecap="round" vectorEffect="non-scaling-stroke">
-            <title>{`${t.side === "buy" ? "Bought" : "Sold"} ${t.csd.toLocaleString(undefined, { maximumFractionDigits: 2 })} CSD at ${t.price.toFixed(4)} · ${new Date(t.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`}</title></path>)}
+            <title>{`${t.side === "buy" ? "Bought" : "Sold"} ${t.csd.toLocaleString(undefined, { maximumFractionDigits: 2 })} CSD at ${t.price.toFixed(4)}, ${new Date(t.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`}</title></path>)}
         </svg>
         {/* the price axis and the latest price, as text over the chart (so it isn't stretched with it) */}
         {ticks.map(v => <span key={v} className="faint" style={{ position: "absolute", left: 0, top: `${(Y(v) / H) * 100}%`, transform: "translateY(-50%)", fontSize: 11, lineHeight: 1, padding: "1px 4px 1px 0", background: "var(--card-bg, #fff)" }}>{v.toFixed(dec(v))}</span>)}
@@ -415,6 +415,15 @@ export default function CsdMarketPage() {
   const [copied, setCopied] = useState(false);
   const tradesKey = address ? `covenant.csd.trades.${address.toLowerCase()}` : "";
   const [mine, setMine] = useState<MyTrade[]>([]);
+  // The trade just made: shown on its own until "Buy more"
+  const [justDone, setJustDone] = useState<Hex | null>(null);
+  // Trade (the default) or Market (book, chart, recent trades), kept in the URL's #
+  const [view, setView] = useState<"trade" | "market">("trade");
+  useEffect(() => {
+    const read = () => setView(window.location.hash === "#market" ? "market" : "trade");
+    read(); window.addEventListener("hashchange", read);
+    return () => window.removeEventListener("hashchange", read);
+  }, []);
 
   // market data
   useEffect(() => {
@@ -626,9 +635,8 @@ export default function CsdMarketPage() {
         if (!locked) await sleep(1500);
       }
       setAmount("");
-      setBanner(locked
-        ? { kind: "ok", text: `Bought ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(usdcAmount + feeAmt)} USDC.`, links: r.lockTx ? [{ href: etherscanTx(r.lockTx), label: "USDC lock" }] : [] }
-        : { kind: "info", text: "The market maker accepted, but its USDC lock isn't on Ethereum yet. If it never appears, nothing is taken from you; the trade shows in Your trades." });
+      if (locked) setJustDone(authHash);
+      else setBanner({ kind: "info", text: "The market maker accepted, but its USDC lock isn't on Ethereum yet. If it never appears, nothing is taken from you; the trade shows in Your trades." });
       watchUsdc();
     } catch (e) { setBanner({ kind: "danger", text: errText(e) }); }
     finally { setBusy(null); }
@@ -728,10 +736,8 @@ export default function CsdMarketPage() {
       }
       if (done) {
         saveTrade({ authHash, side: "sell", csdAmount: String(csdAmt), usdcAmount: String(auth.usdcAmount), at: Date.now(), lockTx: o.lockTx, csdTxid: p.txid, releaseTx: r.releaseTx, status: "done", authorization: a, signature: o.signature, csdTx: txToNodeJson(p.tx), aonAuth: o.aon?.auth, maker });
-        setBanner({ kind: "ok", text: `Sold ${fmtCsd(csdAmt)} CSD for ${fmtUsdc(auth.usdcAmount)} USDC.`, links: r.releaseTx ? [{ href: etherscanTx(r.releaseTx), label: "Transaction" }] : [] });
-      } else {
-        setBanner({ kind: "info", text: `Your ${fmtCsd(csdAmt)} CSD is paid. ${fmtUsdc(auth.usdcAmount)} USDC arrives when the market maker releases it, usually within minutes. If it doesn't, a Claim button appears in Your trades, and other market makers can claim it for you too.` });
       }
+      setJustDone(authHash);
       watchUsdc(); setTimeout(csd.refresh, 3000);
     } catch (e) { setBanner({ kind: "danger", text: errText(e) }); }
     finally { setBusy(null); }
@@ -809,7 +815,7 @@ export default function CsdMarketPage() {
     const c = cum(rows, i);
     return (
       <button key={`${s}-${i}`} className="book-row" data-side={s === "buy" ? "buy" : "sell"} style={{ ["--depth" as any]: `${Number((c * 1000n) / maxCum) / 10}%` }}
-        onClick={() => { setSide(s === "sell" ? "buy" : "sell"); setAmount(formatUnits(c, 8)); }}
+        onClick={() => { setSide(s === "sell" ? "buy" : "sell"); setAmount(formatUnits(c, 8)); setJustDone(null); window.location.hash = "trade"; }}
         title={s === "sell" ? `Buy ${fmtCsd(c)} CSD` : `Sell ${fmtCsd(c)} CSD`}>
         <span className={s}>{fmtPx(l.price)}</span>
         <span>{fmtCsd(l.csd, 2)}</span>
@@ -865,15 +871,14 @@ export default function CsdMarketPage() {
     return moved >= 10 ? { moved, vsNow } : null;
   })();
 
-  return (
-    <main style={{ maxWidth: 1240, margin: "0 auto", padding: "0 24px" }}>
-      <section className="hero" style={{ gridTemplateColumns: "1fr", paddingBottom: 12 }}>
-        <div>
-          <h1 className="hero-title">Trade CSD for USDC.</h1>
-          <p className="hero-sub">Straight from your wallet. No account, no deposit.</p>
-        </div>
-      </section>
+  const done = justDone ? mine.find(t => t.authHash === justDone) ?? null : null;
+  const arrived = done ? (done.side === "buy" ? done.status === "done" || !!done.unconfirmed : done.status === "done") : false;
+  const balanceLine = !isConnected ? null : side === "buy"
+    ? (usdcBal === null ? null : `You have ${fmtUsdc(usdcBal)} USDC`)
+    : csd.ready && csd.loaded ? `You have ${fmtCsd(csd.balance)} CSD` : null;
 
+  const notices = (
+    <>
       {!CSD_ENABLED && (
         <div className="banner banner-warn"><strong className="warn">Coming soon</strong><span className="muted">The CSD/USDC market isn't live yet.</span></div>
       )}
@@ -884,7 +889,134 @@ export default function CsdMarketPage() {
           <button className="link-btn" style={{ marginLeft: "auto" }} onClick={() => setBanner(null)}>Dismiss</button>
         </div>
       )}
+    </>
+  );
 
+  const trade = done ? (
+    <section className="cv-main cv-done" aria-live="polite">
+      <span className={arrived ? "cv-status cv-status-ok" : "cv-status"}>
+        {arrived && <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 8.5l3 3 7-7" /></svg>}
+        {arrived ? "Received" : "On its way"}
+      </span>
+      <h1 className="cv-sentence">You {done.side === "buy" ? "bought" : "sold"} <strong>{fmtCsd(BigInt(done.csdAmount))} CSD</strong> for <strong>{fmtUsdc(BigInt(done.usdcAmount))} USDC</strong>.</h1>
+      <div className="cv-act">
+        <button className="btn cv-go cv-go-dark" onClick={() => { setJustDone(null); setSide(done.side); }}>{done.side === "buy" ? "Buy more" : "Sell more"}</button>
+        {done.receipt && <a className="cv-receipt" href={aonLink(done.receipt)} target="_blank" rel="noreferrer">Receipt</a>}
+      </div>
+    </section>
+  ) : (
+    <section className="cv-main" aria-label="Trade">
+      <div className="cv-pills" role="radiogroup" aria-label="Buy or sell">
+        <button role="radio" aria-checked={side === "buy"} className={side === "buy" ? "on" : ""} onClick={() => setSide("buy")}>Buy CSD</button>
+        <button role="radio" aria-checked={side === "sell"} className={side === "sell" ? "on" : ""} onClick={() => setSide("sell")}>Sell CSD</button>
+      </div>
+      <label htmlFor="csd-amount" className="cv-sentence">
+        <span>{side === "buy" ? "I want" : "I want to sell"}</span>{" "}
+        <span className="cv-amount-wrap" data-value={amount || "0"}>
+          <input id="csd-amount" className="cv-amount" inputMode="decimal" autoComplete="off" value={amount} placeholder="0" size={1}
+            onChange={e => setAmount(e.target.value.replace(",", "."))} />
+        </span>{" "}
+        <span>CSD.</span>
+      </label>
+      <p className="cv-quote" aria-live="polite">{preview ? `for ${fmtUsdc(side === "buy" ? preview.total : preview.usdc)} USDC.` : "\u00a0"}</p>
+      {problem && <p className="cv-problem danger" role="alert">{problem}</p>}
+      {!problem && impact && execution && mid && (
+        <p className="cv-problem warn" role="alert">
+          This moves the price {impact.moved.toFixed(0)}%. You {side === "buy" ? "pay" : "get"} {fmtPx(execution.avg)} per CSD on average, against {fmtPx(mid)} now.
+        </p>
+      )}
+      <div className="cv-act">
+        {!isConnected ? (
+          <ConnectWallet className="btn cv-go" label="Connect wallet" />
+        ) : (
+          <button className="btn cv-go" onClick={side === "buy" ? buy : sell}
+            disabled={!!busy || !CSD_ENABLED || wrongChain || (csd.ready && (!preview || !!problem))}>
+            {busy ?? (wrongChain ? "Switch to Ethereum" : !csd.ready ? "Open your CSD wallet" : (side === "buy" ? "Buy" : "Sell") + (impact ? " anyway" : ""))}
+          </button>
+        )}
+        <span className="cv-trust">{side === "buy" ? "The seller is paid only once your CSD arrives." : "Your CSD only leaves once your USDC is held for you."}</span>
+      </div>
+      {balanceLine && (
+        <p className="cv-balance">{balanceLine}
+          {side === "sell" && csd.ready && csd.balance > 10_000n && <>{" "}<button className="link-btn" onClick={() => setAmount(formatUnits(csd.balance - 10_000n, 8))}>Sell all</button></>}
+        </p>
+      )}
+    </section>
+  );
+
+  const wallet = (
+    <aside className="card cv-wallet" aria-label="Your wallet">
+      <h2 className="cv-label">Your wallet</h2>
+      {!isConnected ? (
+        <p className="muted">Connect a wallet to see it.</p>
+      ) : !csd.ready ? (
+        <div className="col" style={{ gap: 12 }}>
+          <p className="muted">Your CSD wallet is created from your Ethereum wallet, so it's yours on any device.</p>
+          <label className="check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} /><span>Remember on this device</span></label>
+          <button className="btn" onClick={() => csd.setup(remember).catch(e => setBanner({ kind: "danger", text: errText(e) }))} disabled={!!busy}>Open CSD wallet</button>
+        </div>
+      ) : (
+        <div className="col" style={{ gap: 14 }}>
+          <div className="row-between cv-bal"><span className="muted">CSD</span><span>{csd.loaded ? fmtCsd(csd.balance + unconfirmed) : "…"}</span></div>
+          {unconfirmed > 0n && <div className="faint" style={{ marginTop: -8 }}>{fmtCsd(unconfirmed)} spendable after the next CSD block</div>}
+          {incoming > 0n && <div className="faint" style={{ marginTop: -8 }}>+{fmtCsd(incoming)} CSD arriving</div>}
+          <div className="row-between cv-bal"><span className="muted">USDC</span><span>{usdcBal === null ? "…" : fmtUsdc(usdcBal)}</span></div>
+          {usdcIncoming > 0n && <div className="faint" style={{ marginTop: -8 }}>+{fmtUsdc(usdcIncoming)} USDC arriving</div>}
+          <details>
+            <summary className="link-btn" style={{ cursor: "pointer" }}>Receive CSD</summary>
+            <div className="col" style={{ gap: 6, marginTop: 10 }}>
+              <button className="link-btn mono" style={{ fontSize: 13, wordBreak: "break-all", textAlign: "left" }} title="Copy"
+                onClick={() => { navigator.clipboard?.writeText(csd.main!.addr20.slice(2)); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
+                {csd.main!.addr20.slice(2)}
+              </button>
+              <span className="faint">{copied ? "Copied" : "Your CSD address. Tap to copy."}</span>
+            </div>
+          </details>
+          <details>
+            <summary className="link-btn" style={{ cursor: "pointer" }}>Send CSD</summary>
+            <div className="col" style={{ gap: 8, marginTop: 10 }}>
+              <input value={sendTo} onChange={e => setSendTo(e.target.value)} placeholder="CSD address (40 characters)" autoComplete="off" spellCheck={false} />
+              <div className="field-unit"><input inputMode="decimal" value={sendAmt} onChange={e => setSendAmt(e.target.value.replace(",", "."))} placeholder="0.00" /><span className="unit">CSD</span></div>
+              {/* Max: all of it that can be sent now, less the network fee (0.0001 CSD) */}
+              <div className="row-between faint" style={{ fontSize: 13 }}>
+                <span>{fmtCsd(csd.balance > 10_000n ? csd.balance - 10_000n : 0n)} CSD can be sent now</span>
+                <button type="button" className="link-btn" disabled={csd.balance <= 10_000n} onClick={() => setSendAmt(formatUnits(csd.balance - 10_000n, 8))}>Max</button>
+              </div>
+              <button className="btn-secondary" onClick={sendCsd} disabled={!!busy}>Send</button>
+            </div>
+          </details>
+          <p className="faint">Your keys, in this browser. Only you can move it. <Link href="/docs/#csd-wallet">How it works</Link></p>
+          <button className="link-btn faint" style={{ justifySelf: "start" }} onClick={csd.forget}>Forget on this device</button>
+          {csd.error && <div className="danger" style={{ fontSize: 14 }}>CSD network unreachable</div>}
+        </div>
+      )}
+    </aside>
+  );
+
+  const yourTrades = mine.length > 0 && (
+    <section className="card cv-trades" aria-label="Your trades">
+      <h2 className="cv-label">Your trades</h2>
+      <table className="tbl"><tbody>
+        {mine.slice(0, 15).map(t => (
+          <tr key={t.authHash}>
+            <td className={t.status === "failed" && !t.releaseTx ? "muted" : t.side}>{t.status === "failed" && !t.releaseTx ? "Not traded" : t.side === "buy" ? "Bought" : "Sold"}</td>
+            <td>{fmtCsd(BigInt(t.csdAmount))} CSD</td>
+            <td>{fmtUsdc(BigInt(t.usdcAmount))} USDC</td>
+            <td className="muted">{t.status === "pending" ? "Pending" : new Date(t.at).toLocaleDateString()}</td>
+            <td>{t.side === "buy" && t.status === "pending" && t.authorization && (t.lockedUntil ? Date.now() / 1000 > t.lockedUntil + 60 : Date.now() - t.at > (10 + 5 * Number(t.authorization.minConfirmations) + 2) * 60_000)
+              ? <button className="link-btn" onClick={() => refund(t)} disabled={!!busy} title="The market maker didn't deliver in time. Take your USDC back (costs a little ETH).">Refund</button>
+              : t.side === "sell" && t.status === "pending" && t.csdTxid && Date.now() - t.at > 10 * 60_000
+              ? <button className="link-btn" onClick={() => claim(t)} disabled={!!busy} title="The market maker hasn't released it. Claim the USDC yourself with a proof of your CSD payment (costs a little ETH).">Claim</button>
+              : t.receipt ? <a href={aonLink(t.receipt)} target="_blank" rel="noreferrer">Receipt</a>
+              : (t.releaseTx ?? t.lockTx) && <a href={etherscanTx((t.releaseTx ?? t.lockTx)!)} target="_blank" rel="noreferrer">Transaction</a>}</td>
+          </tr>
+        ))}
+      </tbody></table>
+    </section>
+  );
+
+  const market = (
+    <>
       <div className="market-bar">
         <MarketTabs active="CSD-USDC" />
         <div className="market-stats">
@@ -899,11 +1031,9 @@ export default function CsdMarketPage() {
 
       {m && <PriceChart trades={m.recent} />}
 
-      <div className="exchange-grid">
+      <div className="exchange-grid two-col">
         <section className="card" aria-label="Order book" style={{ padding: "18px 14px" }}>
-          <div className="row-between" style={{ margin: "0 6px 12px" }}>
-            <h2 className="panel-title" style={{ fontFamily: "var(--sans)" }}>Order book</h2>
-          </div>
+          <h2 className="cv-label" style={{ margin: "0 6px 12px" }}>Order book</h2>
           <div className="book-head"><span>Price (USDC)</span><span>Size (CSD)</span><span>Total (USDC)</span></div>
           {!m ? <div className="book-empty">{mErr ? "Unavailable right now." : "Loading the book…"}</div> : (
             <>
@@ -913,124 +1043,21 @@ export default function CsdMarketPage() {
               </div>
               <div className="book-side">{bids.map((l, i) => row(l, i, "buy", bids))}</div>
               {depth && (
-                <div className="faint" style={{ margin: "12px 6px 0", fontSize: 13, lineHeight: 1.6 }} title="How much can be traded, across all market makers, before the price moves this far">
-                  <div className="row-between"><span>Depth to move the price 2%</span><span>{fmtCsd(BigInt(Math.floor(depth.two.buyCsd * 1e8)), 0)} CSD · {fmtUsdc(BigInt(Math.floor(depth.two.sellUsdc * 1e6)))} USDC</span></div>
-                  <div className="row-between"><span>10%</span><span>{fmtCsd(BigInt(Math.floor(depth.ten.buyCsd * 1e8)), 0)} CSD · {fmtUsdc(BigInt(Math.floor(depth.ten.sellUsdc * 1e6)))} USDC</span></div>
-                  <div style={{ fontSize: 12, marginTop: 2 }}>CSD to buy · USDC to sell</div>
-                </div>
+                <table className="tbl cv-depth" title="How much can be traded, across all market makers, before the price moves this far">
+                  <thead><tr><th>Moves the price</th><th>Buying</th><th>Selling</th></tr></thead>
+                  <tbody>
+                    <tr><td>2%</td><td>{fmtCsd(BigInt(Math.floor(depth.two.buyCsd * 1e8)), 0)} CSD</td><td>{fmtUsdc(BigInt(Math.floor(depth.two.sellUsdc * 1e6)))} USDC</td></tr>
+                    <tr><td>10%</td><td>{fmtCsd(BigInt(Math.floor(depth.ten.buyCsd * 1e8)), 0)} CSD</td><td>{fmtUsdc(BigInt(Math.floor(depth.ten.sellUsdc * 1e6)))} USDC</td></tr>
+                  </tbody>
+                </table>
               )}
             </>
           )}
         </section>
-
-        <section className="card order-card grid" aria-label="Trade" style={{ alignContent: "start", gap: 16 }}>
-          <div className="seg-side" role="radiogroup" aria-label="Buy or sell">
-            <button role="radio" aria-checked={side === "buy"} className={side === "buy" ? "side-buy on" : "side-buy"} onClick={() => setSide("buy")}>Buy CSD</button>
-            <button role="radio" aria-checked={side === "sell"} className={side === "sell" ? "side-sell on" : "side-sell"} onClick={() => setSide("sell")}>Sell CSD</button>
-          </div>
-          <div>
-            <label htmlFor="csd-amount">Amount</label>
-            <div className="field-unit">
-              <input id="csd-amount" inputMode="decimal" autoComplete="off" value={amount} onChange={e => setAmount(e.target.value.replace(",", "."))} placeholder="0.00" />
-              <span className="unit">CSD</span>
-            </div>
-            {side === "sell" && csd.ready && csd.balance > 0n && (
-              <div className="pct-row" aria-label="Use part of your CSD">
-                {[25n, 50n, 75n, 100n].map(p => (
-                  <button key={String(p)} className="pct" onClick={() => setAmount(formatUnits(p === 100n ? csd.balance - 10_000n : (csd.balance * p) / 100n, 8))}>{p === 100n ? "Max" : `${p}%`}</button>
-                ))}
-              </div>
-            )}
-          </div>
-          <div className="summary">
-            <div className="row-between">
-              <span className="muted">{side === "buy" ? "You pay" : "You receive"}</span>
-              <span>{preview ? `${fmtUsdc(side === "buy" ? preview.total : preview.usdc)} USDC` : "—"}</span>
-            </div>
-            {execution && <div className="row-between"><span className="muted">Average price</span><span>{fmtPx(execution.avg)} per CSD</span></div>}
-            {execution && <div className="row-between"><span className="muted">Price after your trade</span><span>{fmtPx(execution.after)}</span></div>}
-            {preview && best && <div className="faint">Includes a {fmtUsdc(fee)} USDC fee · market maker <a href={aonLink(best.offer.objectHash)} target="_blank" rel="noreferrer" className="mono">{best.maker.slice(0, 6)}…{best.maker.slice(-4)}</a></div>}
-            <div className="row-between">
-              <span className="muted">Available</span>
-              <span>{!isConnected ? "Connect a wallet to see" : side === "buy" ? (usdcBal === null ? "…" : `${fmtUsdc(usdcBal)} USDC`) : csd.ready ? `${fmtCsd(csd.balance)} CSD` : "Open your CSD wallet"}</span>
-            </div>
-          </div>
-          {problem && <div className="form-problem danger" role="alert">{problem}</div>}
-          {!problem && impact && execution && mid && (
-            <div className="form-problem warn" role="alert" style={{ background: "var(--warn-bg, #fff7e6)", border: "1px solid var(--warn-border, #f0d29a)", borderRadius: 8, padding: "10px 12px" }}>
-              <strong>This trade moves the price {impact.moved.toFixed(0)}%</strong>, from {fmtPx(mid)} to {fmtPx(execution.after)}.
-              {" "}You {side === "buy" ? "pay" : "get"} {fmtPx(execution.avg)} per CSD on average, {Math.abs(impact.vsNow).toFixed(0)}% {side === "buy" ? (impact.vsNow >= 0 ? "above" : "below") : (impact.vsNow >= 0 ? "below" : "above")} the price now.
-              {" "}The market is thin: splitting it into smaller {side === "buy" ? "buys" : "sales"} moves the price just as far in total.
-            </div>
-          )}
-          {!isConnected ? (
-            <ConnectWallet className="btn btn-lg" label="Connect wallet to trade" />
-          ) : (
-            <button className={`btn-lg ${side === "buy" ? "btn-buy" : "btn-sell"}`} onClick={side === "buy" ? buy : sell}
-              disabled={!!busy || !CSD_ENABLED || wrongChain || (csd.ready && (!preview || !!problem))}>
-              {busy ?? (wrongChain ? "Switch to Ethereum" : !csd.ready ? "Open your CSD wallet" : (side === "buy" ? "Buy CSD" : "Sell CSD") + (impact ? " anyway" : ""))}
-            </button>
-          )}
-        </section>
-
-        <section className="card trades-card" aria-label="Your wallet" style={{ padding: "18px 18px", alignContent: "start" }}>
-          <h2 className="panel-title" style={{ fontFamily: "var(--sans)", marginBottom: 12 }}>Your wallet</h2>
-          {!isConnected ? (
-            <p className="muted">Connect a wallet to see it.</p>
-          ) : !csd.ready ? (
-            <div className="col" style={{ gap: 12 }}>
-              <p className="muted">Created from your Ethereum wallet, so it's yours on any device.</p>
-              <label className="check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} /><span>Remember on this device</span></label>
-              <button className="btn" onClick={() => csd.setup(remember).catch(e => setBanner({ kind: "danger", text: errText(e) }))} disabled={!!busy}>Open CSD wallet</button>
-            </div>
-          ) : (
-            <div className="col" style={{ gap: 14 }}>
-              <div>
-                <div className="stat-label">CSD</div>
-                <div className="stat" style={{ fontSize: 22 }}>{csd.loaded ? fmtCsd(csd.balance + unconfirmed) : "…"}</div>
-                {unconfirmed > 0n && <div className="faint">incl. {fmtCsd(unconfirmed)} unconfirmed, spendable after the next CSD block</div>}
-                {incoming > 0n && <div className="faint">+{fmtCsd(incoming)} CSD arriving</div>}
-                {mid !== null && csd.balance + unconfirmed > 0n && <div className="faint">≈ {fmtUsdc(((csd.balance + unconfirmed) * mid) / 100_000_000n)} USDC</div>}
-              </div>
-              <div>
-                <div className="stat-label">USDC</div>
-                <div className="stat" style={{ fontSize: 22 }}>{usdcBal === null ? "…" : fmtUsdc(usdcBal)}</div>
-                {usdcIncoming > 0n && <div className="faint">+{fmtUsdc(usdcIncoming)} USDC arriving</div>}
-              </div>
-              <div>
-                <div className="stat-label">Receive</div>
-                <button className="link-btn mono" style={{ fontSize: 13, wordBreak: "break-all", textAlign: "left" }} title="Copy"
-                  onClick={() => { navigator.clipboard?.writeText(csd.main!.addr20.slice(2)); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
-                  {csd.main!.addr20.slice(2)}
-                </button>
-                <div className="faint">{copied ? "Copied" : "Send CSD here to sell it."}</div>
-              </div>
-              <details>
-                <summary className="link-btn" style={{ cursor: "pointer" }}>Send CSD</summary>
-                <div className="col" style={{ gap: 8, marginTop: 10 }}>
-                  <input value={sendTo} onChange={e => setSendTo(e.target.value)} placeholder="CSD address (40 characters)" autoComplete="off" spellCheck={false} />
-                  <div className="field-unit"><input inputMode="decimal" value={sendAmt} onChange={e => setSendAmt(e.target.value.replace(",", "."))} placeholder="0.00" /><span className="unit">CSD</span></div>
-                  {/* Max: all of it that can be sent now, less the network fee (0.0001 CSD) */}
-                  <div className="row-between faint" style={{ fontSize: 13 }}>
-                    <span>{fmtCsd(csd.balance > 10_000n ? csd.balance - 10_000n : 0n)} CSD can be sent now</span>
-                    <button type="button" className="link-btn" disabled={csd.balance <= 10_000n} onClick={() => setSendAmt(formatUnits(csd.balance - 10_000n, 8))}>Max</button>
-                  </div>
-                  <button className="btn-secondary" onClick={sendCsd} disabled={!!busy}>Send</button>
-                </div>
-              </details>
-              <p className="faint">Your keys, in this browser. Only you can move it. <Link href="/docs/#csd-wallet">How it works</Link></p>
-              <button className="link-btn faint" style={{ justifySelf: "start" }} onClick={csd.forget}>Forget on this device</button>
-              {csd.error && <div className="danger" style={{ fontSize: 14 }}>CSD network unreachable</div>}
-            </div>
-          )}
-        </section>
-      </div>
-
-      <div className="exchange-grid two-col" style={{ marginTop: 16 }}>
         <section className="card" aria-label="Recent trades" style={{ padding: "18px 14px" }}>
-          <h2 className="panel-title" style={{ fontFamily: "var(--sans)", margin: "0 6px 12px" }}>Recent trades</h2>
+          <h2 className="cv-label" style={{ margin: "0 6px 12px" }}>Recent trades</h2>
           <div className="book-head"><span>Price</span><span>Size (CSD)</span><span>Time</span></div>
-          {!m || m.recent.length === 0 ? <div className="book-empty">No trades yet.</div> : m.recent.slice(0, 15).map((t, i) => (
+          {!m || m.recent.length === 0 ? <div className="book-empty">No trades yet.</div> : m.recent.slice(0, 20).map((t, i) => (
             <div key={i} className="trade-row">
               <span className={t.side === "buy" ? "buy" : "sell"}>{fmtPx(BigInt(t.price))}</span>
               <span>{fmtCsd(BigInt(t.csdAmount), 2)}</span>
@@ -1038,28 +1065,26 @@ export default function CsdMarketPage() {
             </div>
           ))}
         </section>
-        <section className="card" aria-label="Your trades" style={{ padding: "18px 14px" }}>
-          <h2 className="panel-title" style={{ fontFamily: "var(--sans)", margin: "0 6px 12px" }}>Your trades</h2>
-          {mine.length === 0 ? <div className="book-empty">{isConnected ? "Your CSD trades will show here." : "Connect a wallet to see your trades."}</div> : (
-            <table className="tbl"><tbody>
-              {mine.slice(0, 15).map(t => (
-                <tr key={t.authHash}>
-                  <td className={t.status === "failed" && !t.releaseTx ? "muted" : t.side}>{t.status === "failed" && !t.releaseTx ? "Not traded" : t.side === "buy" ? "Bought" : "Sold"}</td>
-                  <td>{fmtCsd(BigInt(t.csdAmount))} CSD</td>
-                  <td>{fmtUsdc(BigInt(t.usdcAmount))} USDC</td>
-                  <td className="muted">{t.status === "pending" ? "Pending" : new Date(t.at).toLocaleDateString()}</td>
-                  <td>{t.side === "buy" && t.status === "pending" && t.authorization && (t.lockedUntil ? Date.now() / 1000 > t.lockedUntil + 60 : Date.now() - t.at > (10 + 5 * Number(t.authorization.minConfirmations) + 2) * 60_000)
-                    ? <button className="link-btn" onClick={() => refund(t)} disabled={!!busy} title="The market maker didn't deliver in time. Take your USDC back (costs a little ETH).">Refund</button>
-                    : t.side === "sell" && t.status === "pending" && t.csdTxid && Date.now() - t.at > 10 * 60_000
-                    ? <button className="link-btn" onClick={() => claim(t)} disabled={!!busy} title="The market maker hasn't released it. Claim the USDC yourself with a proof of your CSD payment (costs a little ETH).">Claim</button>
-                    : t.receipt ? <a href={aonLink(t.receipt)} target="_blank" rel="noreferrer">Receipt</a>
-                    : (t.releaseTx ?? t.lockTx) && <a href={etherscanTx((t.releaseTx ?? t.lockTx)!)} target="_blank" rel="noreferrer">Tx</a>}</td>
-                </tr>
-              ))}
-            </tbody></table>
-          )}
-        </section>
       </div>
+    </>
+  );
+
+  return (
+    <main className="cv-page">
+      <div className="cv-views" role="tablist" aria-label="View">
+        <a href="#trade" role="tab" aria-selected={view === "trade"} className={view === "trade" ? "on" : ""}>Trade</a>
+        <a href="#market" role="tab" aria-selected={view === "market"} className={view === "market" ? "on" : ""}>Market</a>
+      </div>
+      {notices}
+      {view === "market" ? market : (
+        <>
+          <div className="cv-grid">
+            {trade}
+            {wallet}
+          </div>
+          {yourTrades}
+        </>
+      )}
     </main>
   );
 }

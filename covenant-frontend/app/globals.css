@@ -394,3 +394,52 @@ a.tab { text-decoration: none; text-align: center; }
 .connect-option { display: flex; align-items: center; justify-content: center; gap: 10px; }
 .connect-option img { border-radius: 4px; }
 .connect-error { font-size: 13px; margin-top: 6px; max-width: 320px; }
+
+/* ---------- CSD: the sentence, then the market ---------- */
+.cv-page { max-width: 1040px; margin: 0 auto; padding: 8px 24px 64px; }
+.cv-views { display: flex; gap: 22px; margin: 18px 0 30px; }
+.cv-views a { color: var(--muted); text-decoration: none; font-size: 15px; font-weight: 500; padding: 4px 0; border-bottom: 2px solid transparent; }
+.cv-views a.on { color: var(--fg); border-bottom-color: var(--fg); }
+.cv-views a:hover { color: var(--fg); }
+.cv-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 48px; align-items: start; }
+.cv-main { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.cv-pills { display: flex; gap: 8px; }
+.cv-pills > button { border-radius: 999px; padding: 8px 16px; font-size: 14px; font-weight: 500; border: 1px solid var(--line-strong); background: transparent; color: var(--muted); }
+.cv-pills > button.on, .cv-pills > button.on:hover:not(:disabled) { background: var(--fg); border-color: var(--fg); color: #fff; }
+.cv-sentence { font-family: var(--serif); font-weight: 400; font-size: clamp(32px, 5vw, 44px); line-height: 1.25; letter-spacing: -0.01em; color: var(--fg); margin: 6px 0 0; }
+.cv-sentence strong { font-weight: 600; }
+/* the field is as wide as what's typed in it */
+.cv-amount-wrap { display: inline-grid; vertical-align: baseline; }
+.cv-amount-wrap::after { content: attr(data-value); visibility: hidden; white-space: pre; grid-area: 1 / 1; padding: 0 2px; font: inherit; }
+.cv-amount-wrap > .cv-amount { grid-area: 1 / 1; width: 100%; }
+.cv-amount { font: inherit; color: inherit; background: transparent; border: none; border-bottom: 2px solid var(--blue); border-radius: 0; padding: 0 0 2px; min-width: 2ch; max-width: 100%; outline: none; box-shadow: none; }
+.cv-amount:focus { border-bottom-color: var(--fg); box-shadow: none; }
+.cv-amount::placeholder { color: var(--line-strong); }
+.cv-quote { font-family: var(--serif); font-size: clamp(32px, 5vw, 44px); line-height: 1.25; letter-spacing: -0.01em; color: var(--muted); margin: -12px 0 0; }
+.cv-problem { margin: 0; font-size: 15px; line-height: 1.5; }
+.cv-act { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-top: 14px; }
+.cv-go { padding: 14px 44px; font-size: 16px; font-weight: 600; border-radius: 8px; }
+.cv-go-dark { background: var(--fg); border-color: var(--fg); }
+.cv-go-dark:hover:not(:disabled) { background: #0E1524; }
+.cv-trust { font-size: 14px; color: var(--muted); }
+.cv-balance { margin: 0; font-size: 14px; color: var(--faint); }
+.cv-done { gap: 22px; padding-top: 10px; }
+.cv-status { align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: var(--muted); background: var(--sunken); padding: 6px 12px; border-radius: 999px; }
+.cv-status-ok { color: var(--buy); background: var(--buy-soft); }
+.cv-receipt { margin-left: auto; font-size: 14px; color: var(--faint); }
+.cv-label { font-family: var(--sans); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0 0 14px; }
+.cv-wallet { padding: 22px; }
+.cv-bal { font-size: 16px; }
+.cv-bal > span:last-child { font-weight: 600; }
+.cv-trades { margin-top: 48px; padding: 18px 18px; }
+.cv-depth { margin: 14px 6px 0; width: calc(100% - 12px); font-size: 13px; color: var(--faint); }
+.cv-depth th { font-weight: 500; text-align: left; }
+@media (max-width: 820px) {
+  .cv-grid { grid-template-columns: 1fr; gap: 32px; }
+  .cv-page { padding: 4px 16px 48px; }
+  .cv-views { margin: 12px 0 22px; }
+  .cv-act { gap: 12px; }
+  .cv-go, .cv-act > .connect-wrap { flex: 1 1 100%; }
+  .cv-act > .connect-wrap > .cv-go { width: 100%; }
+  .cv-trust { flex: 1 1 100%; text-align: center; }
+}

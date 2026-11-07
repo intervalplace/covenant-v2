@@ -443,3 +443,9 @@ a.tab { text-decoration: none; text-align: center; }
   .cv-act > .connect-wrap > .cv-go { width: 100%; }
   .cv-trust { flex: 1 1 100%; text-align: center; }
 }
+
+/* liquidity, counted on chain */
+.cv-views-sub { margin-left: 8px; font-size: 13px; font-weight: 400; color: var(--faint); }
+.cv-liquidity { margin: 0 0 28px; }
+.cv-liq-total { font-family: var(--serif); font-size: clamp(34px, 5vw, 48px); line-height: 1.15; letter-spacing: -0.01em; margin: 4px 0 8px; }
+.cv-liq-parts { margin: 0; font-size: 14px; color: var(--muted); line-height: 1.6; max-width: 640px; }

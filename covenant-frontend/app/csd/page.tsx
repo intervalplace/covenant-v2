@@ -6,7 +6,7 @@
 // the market maker locks USDC for the user first, the page checks the lock on
 // Ethereum, and only then does the in-site CSD wallet pay.
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAccount, usePublicClient, useSignTypedData, useWriteContract } from "wagmi";
 import { ConnectWallet } from "@/connect";
 import { decodeEventLog, formatUnits, hashTypedData, keccak256, parseAbiItem, parseUnits, recoverTypedDataAddress, toHex, type Address, type Hex } from "viem";
@@ -16,7 +16,7 @@ import {
   CSD_ENABLED, CSD_SALE_EXECUTOR_FEE, CSD_MM_URL, CSD_SETTLEMENT, CSD_USDC, CSD_GENESIS, CSD_BUY_CONFIRMATIONS, CSD_EXPLORER, CSD_NODE_URL, CSD_TARGET_REF, CSD_MARKET_MAKERS, csdSettleAbi, csdRefundAbi,
   CSD_AUTH_TYPES, PERMIT_TYPES, csdDomain, csdSettlementAbi, usdcPermitAbi, mmGet, type CsdMarket,
 } from "@/csd/config";
-import { addr20ToBytes32, csdAddressProof, csdTxid, incomingPaymentLooksReal, txToNodeJson, txFromNodeJson, bitsToTarget, csdNode, csdSaleRequestDigest, csdSignDigest, type Hex as CHex, type CsdUtxo } from "@/csd/csd-wallet";
+import { addr20ToBytes32, csdAddressProof, csdTxid, incomingPaymentLooksReal, txToNodeJson, txFromNodeJson, bitsToTarget, csdNode, csdSaleRequestDigest, csdSignDigest, csdSignerAddress, csdReservesDigest, type Hex as CHex, type CsdUtxo } from "@/csd/csd-wallet";
 import { quoteBuy, quoteSell, midPrice, ladder, afterBuy, afterSell, type Pool } from "@/csd/pool";
 import { aonApi, buyAuthorizationObject, saleRequestObject, salePaymentObject, objectSigner } from "@/csd/aon-client";
 import { aonFetch } from "@/endpoints";
@@ -871,6 +871,43 @@ export default function CsdMarketPage() {
     return moved >= 10 ? { moved, vsNow } : null;
   })();
 
+  // Liquidity, counted from the chains: each maker's USDC at its Ethereum address (if it buys CSD) and
+  // the CSD at the addresses it has signed for (if it sells it). Nothing an offer merely says counts.
+  const [liq, setLiq] = useState<{ usdc: bigint; csd: bigint; maxTrade: bigint | null } | null>(null);
+  const marketRef = useRef(m); marketRef.current = m;
+  const makersKey = m?.makers.map(x => `${x.addr}:${x.sell?.objectHash ?? ""}:${x.buy?.objectHash ?? ""}`).join() ?? "";
+  useEffect(() => {
+    if (!makersKey || !publicClient) return;
+    let gone = false;
+    const node = independentNode ?? csdNode(`${CSD_MM_URL}/api/csd`);
+    const count = async () => {
+      const mk = marketRef.current; if (!mk) return;
+      let usdc = 0n, csdHeld = 0n, maxTrade: bigint | null = null;
+      for (const x of mk.makers) {
+        for (const o of [x.sell, x.buy]) { try { const t = BigInt(o?.payload?.maxTradeUsdc ?? 0); if (t > 0n && (maxTrade === null || t > maxTrade)) maxTrade = t; } catch {} }
+        if (x.buy) {
+          try { usdc += await publicClient.readContract({ address: CSD_USDC, abi: usdcPermitAbi, functionName: "balanceOf", args: [x.addr as Address] }) as bigint; } catch {}
+        }
+        if (x.sell) {
+          const digest = csdReservesDigest(x.addr), seen = new Set<string>();
+          const listed = Array.isArray(x.sell.payload?.reserves?.csd) ? x.sell.payload.reserves.csd.slice(0, 50) : [];
+          for (const r of listed) {
+            const a = String(r?.addr ?? "").toLowerCase();
+            if (seen.has(a) || !/^0x[0-9a-f]{40}$/.test(a) || csdSignerAddress(digest, String(r?.sig ?? "") as CHex)?.toLowerCase() !== a) continue;
+            seen.add(a);
+            try { for (const c of await node.utxosAt(a as CHex)) csdHeld += c.value; } catch {}
+          }
+        }
+      }
+      if (!gone) setLiq({ usdc, csd: csdHeld, maxTrade });
+    };
+    count();
+    const id = setInterval(count, 120_000);
+    return () => { gone = true; clearInterval(id); };
+  }, [makersKey, publicClient]);
+  const liqValue = liq && mid !== null ? liq.usdc + liq.csd * mid / 100_000_000n : null; // in USDC (6 decimals)
+  const compact = (v: bigint) => { const n = Number(v) / 1e6; return n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : n.toFixed(0); };
+
   const done = justDone ? mine.find(t => t.authHash === justDone) ?? null : null;
   const arrived = done ? (done.side === "buy" ? done.status === "done" || !!done.unconfirmed : done.status === "done") : false;
   const balanceLine = !isConnected ? null : side === "buy"
@@ -1019,6 +1056,16 @@ export default function CsdMarketPage() {
 
   const market = (
     <>
+      {liq && liqValue !== null && (
+        <section className="cv-liquidity" aria-label="Liquidity">
+          <div className="cv-label">Liquidity, counted on chain</div>
+          <div className="cv-liq-total">{fmtUsdc(liqValue)} USDC</div>
+          <p className="cv-liq-parts">
+            {fmtCsd(liq.csd, 0)} CSD you can buy and {fmtUsdc(liq.usdc)} USDC you can sell CSD for, held at the market makers&apos; own addresses.
+            {liq.maxTrade !== null && <> Each trade is up to {fmtUnits(liq.maxTrade, 6, 0)} USDC.</>}
+          </p>
+        </section>
+      )}
       <div className="market-bar">
         <MarketTabs active="CSD-USDC" />
         <div className="market-stats">
@@ -1075,7 +1122,7 @@ export default function CsdMarketPage() {
     <main className="cv-page">
       <div className="cv-views" role="tablist" aria-label="View">
         <a href="#trade" role="tab" aria-selected={view === "trade"} className={view === "trade" ? "on" : ""}>Trade</a>
-        <a href="#market" role="tab" aria-selected={view === "market"} className={view === "market" ? "on" : ""}>Market</a>
+        <a href="#market" role="tab" aria-selected={view === "market"} className={view === "market" ? "on" : ""}>Market{liqValue !== null && liqValue > 0n && <span className="cv-views-sub" title="Liquidity, counted on chain">{compact(liqValue)} USDC</span>}</a>
       </div>
       {notices}
       {view === "market" ? market : (
